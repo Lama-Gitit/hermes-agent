@@ -57,6 +57,7 @@ with open(os.path.join(hook_dir, "HOOK.yaml"), "w") as f:
     f.write("""name: supabase-messages
 description: Persist user messages and bot responses to hermes_messages in Supabase
 events:
+  - gateway:startup
   - agent:start
   - agent:end
 """)
@@ -123,6 +124,11 @@ def _save_message(chat_id, role, content):
 async def handle(event_type, context):
     """Hook entrypoint — called by HookRegistry.emit()."""
     print(f"[supabase-messages] Hook fired: {event_type}", flush=True)
+
+    if event_type == "gateway:startup":
+        print("[supabase-messages] Gateway startup confirmed — hook dispatch is working", flush=True)
+        return
+
     chat_id = context.get("user_id") or context.get("session_id") or "0"
 
     if event_type == "agent:start":
