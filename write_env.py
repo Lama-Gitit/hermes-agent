@@ -70,9 +70,8 @@ the bot response. Both are saved to hermes_messages with chat_id, role,
 and content.
 """
 import os
-import logging
-
-logger = logging.getLogger(__name__)
+import sys
+from datetime import datetime, timezone
 
 _client = None
 
@@ -83,34 +82,47 @@ def _get_client():
     url = os.getenv("SUPABASE_URL", "").strip()
     key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     if not url or not key:
+        print("[supabase-messages] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set", flush=True)
         return None
     try:
         from supabase import create_client
         _client = create_client(url, key)
+        print(f"[supabase-messages] Client connected to {url}", flush=True)
         return _client
     except Exception as e:
-        logger.error("[supabase-messages] Failed to create client: %s", e)
+        print(f"[supabase-messages] Failed to create client: {e}", flush=True)
         return None
 
 
 def _save_message(chat_id, role, content):
     """Insert a single message row into hermes_messages."""
     client = _get_client()
-    if not client or not content:
+    if not client:
+        print(f"[supabase-messages] No client — skipping {role} message", flush=True)
+        return
+    if not content:
         return
     try:
+        # chat_id from Telegram is a numeric string; convert safely
+        try:
+            chat_id_int = int(chat_id)
+        except (ValueError, TypeError):
+            chat_id_int = 0
         client.table("hermes_messages").insert({
-            "chat_id": int(chat_id) if chat_id else 0,
+            "chat_id": chat_id_int,
             "role": role,
             "content": content,
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }).execute()
+        print(f"[supabase-messages] Saved {role} message (chat {chat_id_int})", flush=True)
     except Exception as e:
         # Never block the main pipeline
-        logger.error("[supabase-messages] insert failed: %s", e)
+        print(f"[supabase-messages] Insert failed: {e}", flush=True)
 
 
 async def handle(event_type, context):
     """Hook entrypoint — called by HookRegistry.emit()."""
+    print(f"[supabase-messages] Hook fired: {event_type}", flush=True)
     chat_id = context.get("user_id") or context.get("session_id") or "0"
 
     if event_type == "agent:start":

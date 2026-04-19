@@ -60,6 +60,8 @@ _HERMES_CORE_TOOLS = [
     "send_message",
     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
+    # Supabase TCG knowledge base (gated on SUPABASE_URL via check_fn)
+    "save_entry", "query_entries", "list_sources", "add_source",
 ]
 
 
@@ -129,6 +131,12 @@ TOOLSETS = {
     "messaging": {
         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",
         "tools": ["send_message"],
+        "includes": []
+    },
+
+    "supabase_tcg": {
+        "description": "Pokémon TCG knowledge base — save/query card entries and manage watched sources via Supabase",
+        "tools": ["save_entry", "query_entries", "list_sources", "add_source"],
         "includes": []
     },
     
