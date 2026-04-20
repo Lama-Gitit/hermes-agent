@@ -2,6 +2,18 @@ import os
 import sys
 import time
 
+# ── DEBUG: what env vars does this process actually see at boot? ──────
+print(f"[write_env] PID={os.getpid()} sees {len(os.environ)} env vars", flush=True)
+print(f"[write_env] ALL KEYS: {sorted(os.environ.keys())}", flush=True)
+for k in ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "HERMES_MODEL"]:
+    v = os.environ.get(k)
+    if v is None:
+        print(f"[write_env] {k} = <MISSING>", flush=True)
+    else:
+        # show length + first/last 4 chars, never the full secret
+        shown = f"{v[:4]}...{v[-4:]}" if len(v) > 10 else "<short>"
+        print(f"[write_env] {k} len={len(v)} preview={shown}", flush=True)
+
 # ── Wait for env vars if needed (NodeOps sometimes injects them late) ─
 _REQUIRED = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
 for attempt in range(4):  # check immediately, then retry 3 times
