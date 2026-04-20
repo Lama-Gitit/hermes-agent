@@ -1,8 +1,9 @@
 import os
 import sys
 
+# ── Write .env files from environment ─────────────────────────────────
 env_content = ""
-_expected_keys = [
+for k in [
     "ANTHROPIC_API_KEY",
     "HERMES_PROVIDER",
     "HERMES_MODEL",
@@ -12,16 +13,9 @@ _expected_keys = [
     "TELEGRAM_WEBHOOK_PORT",
     "SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
-]
-for k in _expected_keys:
+]:
     if k in os.environ:
         env_content += f"{k}={os.environ[k]}\n"
-
-# Debug: show which keys were found vs missing
-_found = [k for k in _expected_keys if k in os.environ]
-_missing = [k for k in _expected_keys if k not in os.environ]
-print(f"[write_env] Env vars found: {_found}", flush=True)
-print(f"[write_env] Env vars MISSING: {_missing}", flush=True)
 
 os.makedirs("/root/.hermes", exist_ok=True)
 with open("/root/.hermes/.env", "w") as f:
@@ -29,6 +23,7 @@ with open("/root/.hermes/.env", "w") as f:
 with open("/app/.env", "w") as f:
     f.write(env_content)
 
+# ── SOUL.md ───────────────────────────────────────────────────────────
 with open("/root/.hermes/SOUL.md", "w") as f:
     f.write("""# TCG Hermes — Pokemon Card Trading Agent
 ## Who You Are
@@ -56,97 +51,105 @@ You are a Pokemon card trading intelligence agent. Your primary job is to monito
 
 # ── Create message-persistence hook ──────────────────────────────────
 # Container resets on every deploy, so we write hook files at startup.
-# The hook fires on agent:start + agent:end to log messages to Supabase.
+# The hook uses asyncpg (direct Postgres) with the POSTGRES_* vars that
+# NodeOps injects via the Supabase integration — no Supabase SDK needed.
 hook_dir = "/root/.hermes/hooks/supabase-messages"
 os.makedirs(hook_dir, exist_ok=True)
 
 with open(os.path.join(hook_dir, "HOOK.yaml"), "w") as f:
     f.write("""name: supabase-messages
-description: Persist user messages and bot responses to hermes_messages in Supabase
+description: Persist user messages and bot responses to hermes_messages via direct Postgres
 events:
-  - gateway:startup
   - agent:start
   - agent:end
 """)
 
-with open(os.path.join(hook_dir, "handler.py"), "w") as f:
-    f.write('''"""
-Supabase message persistence hook.
+# Bake Postgres credentials into handler.py at write time so the hook
+# does not depend on os.environ (which the gateway may overwrite).
+_pg_host = os.environ.get("POSTGRES_HOST", "")
+_pg_port = os.environ.get("POSTGRES_PORT", "6543")
+_pg_db   = os.environ.get("POSTGRES_DB", "")
+_pg_user = os.environ.get("POSTGRES_USER", "")
+_pg_pass = os.environ.get("POSTGRES_PASSWORD", "")
 
-Fires on agent:start to capture the user message, and agent:end to capture
-the bot response. Both are saved to hermes_messages with chat_id, role,
-and content.
+_pg_found = [k for k in ["POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"]
+             if os.environ.get(k)]
+_pg_missing = [k for k in ["POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"]
+               if not os.environ.get(k)]
+print(f"[write_env] Postgres vars found: {_pg_found}", flush=True)
+if _pg_missing:
+    print(f"[write_env] Postgres vars MISSING: {_pg_missing}", flush=True)
+
+with open(os.path.join(hook_dir, "handler.py"), "w") as f:
+    f.write(f'''"""
+Supabase message persistence hook — direct Postgres via asyncpg.
+
+Credentials are baked in at container startup by write_env.py.
 """
-import os
-import sys
+import asyncpg
 from datetime import datetime, timezone
 
-_client = None
+_PG_HOST = "{_pg_host}"
+_PG_PORT = "{_pg_port}"
+_PG_DB   = "{_pg_db}"
+_PG_USER = "{_pg_user}"
+_PG_PASS = "{_pg_pass}"
 
-def _get_client():
-    global _client
-    if _client is not None:
-        return _client
-    url = os.getenv("SUPABASE_URL", "").strip()
-    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    if not url or not key:
-        print("[supabase-messages] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set", flush=True)
+_pool = None
+
+async def _get_pool():
+    global _pool
+    if _pool is not None:
+        return _pool
+    if not _PG_HOST or not _PG_DB:
+        print("[supabase-messages] Postgres credentials not baked in", flush=True)
         return None
     try:
-        from supabase import create_client
-        _client = create_client(url, key)
-        print(f"[supabase-messages] Client connected to {url}", flush=True)
-        return _client
+        _pool = await asyncpg.create_pool(
+            host=_PG_HOST, port=int(_PG_PORT), database=_PG_DB,
+            user=_PG_USER, password=_PG_PASS,
+            min_size=1, max_size=2,
+            ssl="require",
+        )
+        print(f"[supabase-messages] Connected to Postgres at {{_PG_HOST}}", flush=True)
+        return _pool
     except Exception as e:
-        print(f"[supabase-messages] Failed to create client: {e}", flush=True)
+        print(f"[supabase-messages] Postgres connection failed: {{e}}", flush=True)
         return None
 
 
-def _save_message(chat_id, role, content):
-    """Insert a single message row into hermes_messages."""
-    client = _get_client()
-    if not client:
-        print(f"[supabase-messages] No client — skipping {role} message", flush=True)
-        return
-    if not content:
+async def _save_message(chat_id, role, content):
+    pool = await _get_pool()
+    if not pool or not content:
         return
     try:
-        # chat_id from Telegram is a numeric string; convert safely
-        try:
-            chat_id_int = int(chat_id)
-        except (ValueError, TypeError):
-            chat_id_int = 0
-        client.table("hermes_messages").insert({
-            "chat_id": chat_id_int,
-            "role": role,
-            "content": content,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
-        print(f"[supabase-messages] Saved {role} message (chat {chat_id_int})", flush=True)
+        chat_id_int = int(chat_id) if chat_id else 0
+    except (ValueError, TypeError):
+        chat_id_int = 0
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO hermes_messages (chat_id, role, content, created_at) VALUES ($1, $2, $3, $4)",
+                chat_id_int, role, content, datetime.now(timezone.utc),
+            )
+        print(f"[supabase-messages] Saved {{role}} message (chat {{chat_id_int}})", flush=True)
     except Exception as e:
-        # Never block the main pipeline
-        print(f"[supabase-messages] Insert failed: {e}", flush=True)
+        print(f"[supabase-messages] Insert failed: {{e}}", flush=True)
 
 
 async def handle(event_type, context):
     """Hook entrypoint — called by HookRegistry.emit()."""
-    print(f"[supabase-messages] Hook fired: {event_type}", flush=True)
-
-    if event_type == "gateway:startup":
-        print("[supabase-messages] Gateway startup confirmed — hook dispatch is working", flush=True)
-        return
-
     chat_id = context.get("user_id") or context.get("session_id") or "0"
 
     if event_type == "agent:start":
         message = context.get("message", "")
         if message:
-            _save_message(chat_id, "user", message)
+            await _save_message(chat_id, "user", message)
 
     elif event_type == "agent:end":
         response = context.get("response", "")
         if response:
-            _save_message(chat_id, "assistant", response)
+            await _save_message(chat_id, "assistant", response)
 ''')
 
 print("[write_env] Created supabase-messages hook", flush=True)
