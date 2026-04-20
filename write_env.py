@@ -128,7 +128,7 @@ async def handle(event_type, context):
             try:
                 client.table("hermes_messages").insert({{
                     "chat_id": 0,
-                    "role": "system",
+                    "role": "assistant",
                     "content": "startup-test: hook connected successfully",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 }}).execute()
