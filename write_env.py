@@ -2,7 +2,7 @@ import os
 import sys
 
 env_content = ""
-for k in [
+_expected_keys = [
     "ANTHROPIC_API_KEY",
     "HERMES_PROVIDER",
     "HERMES_MODEL",
@@ -12,9 +12,16 @@ for k in [
     "TELEGRAM_WEBHOOK_PORT",
     "SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
-]:
+]
+for k in _expected_keys:
     if k in os.environ:
         env_content += f"{k}={os.environ[k]}\n"
+
+# Debug: show which keys were found vs missing
+_found = [k for k in _expected_keys if k in os.environ]
+_missing = [k for k in _expected_keys if k not in os.environ]
+print(f"[write_env] Env vars found: {_found}", flush=True)
+print(f"[write_env] Env vars MISSING: {_missing}", flush=True)
 
 os.makedirs("/root/.hermes", exist_ok=True)
 with open("/root/.hermes/.env", "w") as f:
