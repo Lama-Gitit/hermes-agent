@@ -1,5 +1,25 @@
 import os
 import sys
+import time
+
+# ── Wait for env vars if needed (NodeOps sometimes injects them late) ─
+_REQUIRED = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
+for attempt in range(4):  # check immediately, then retry 3 times
+    if all(k in os.environ for k in _REQUIRED):
+        break
+    if attempt == 0:
+        print("[write_env] Supabase env vars not found yet, waiting for NodeOps injection...", flush=True)
+    time.sleep(3)
+    # Re-read /proc/self/environ in case vars were injected after process start
+    try:
+        with open("/proc/self/environ", "rb") as f:
+            for entry in f.read().split(b"\0"):
+                if b"=" in entry:
+                    k, v = entry.decode("utf-8", errors="replace").split("=", 1)
+                    if k not in os.environ:
+                        os.environ[k] = v
+    except Exception:
+        pass
 
 # ── Write .env files from environment ─────────────────────────────────
 env_content = ""
