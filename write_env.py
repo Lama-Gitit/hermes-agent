@@ -60,6 +60,7 @@ with open(os.path.join(hook_dir, "HOOK.yaml"), "w") as f:
     f.write("""name: supabase-messages
 description: Persist user messages and bot responses to hermes_messages
 events:
+  - gateway:startup
   - agent:start
   - agent:end
 """)
@@ -84,7 +85,7 @@ def _get_client():
     if _client is not None:
         return _client
     if not _SUPABASE_URL or not _SUPABASE_KEY:
-        print("[supabase-messages] Credentials not baked in", flush=True)
+        print("[supabase-messages] Credentials not baked in — check write_env.py", flush=True)
         return None
     try:
         from supabase import create_client
@@ -96,7 +97,7 @@ def _get_client():
         return None
 
 
-async def _save_message(chat_id, role, content):
+def _save_message(chat_id, role, content):
     client = _get_client()
     if not client or not content:
         return
@@ -117,15 +118,36 @@ async def _save_message(chat_id, role, content):
 
 
 async def handle(event_type, context):
+    print(f"[supabase-messages] Hook fired: {{event_type}}", flush=True)
+
+    if event_type == "gateway:startup":
+        # ── Startup self-test: connect + insert a test row ──
+        print("[supabase-messages] Running startup self-test...", flush=True)
+        client = _get_client()
+        if client:
+            try:
+                client.table("hermes_messages").insert({{
+                    "chat_id": 0,
+                    "role": "system",
+                    "content": "startup-test: hook connected successfully",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }}).execute()
+                print("[supabase-messages] STARTUP TEST OK — row inserted into hermes_messages", flush=True)
+            except Exception as e:
+                print(f"[supabase-messages] STARTUP TEST FAILED — insert error: {{e}}", flush=True)
+        else:
+            print("[supabase-messages] STARTUP TEST FAILED — no client", flush=True)
+        return
+
     chat_id = context.get("user_id") or context.get("session_id") or "0"
     if event_type == "agent:start":
         message = context.get("message", "")
         if message:
-            await _save_message(chat_id, "user", message)
+            _save_message(chat_id, "user", message)
     elif event_type == "agent:end":
         response = context.get("response", "")
         if response:
-            await _save_message(chat_id, "assistant", response)
+            _save_message(chat_id, "assistant", response)
 ''')
 
 print("[write_env] Created supabase-messages hook", flush=True)
