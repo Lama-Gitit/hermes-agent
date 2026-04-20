@@ -1,37 +1,5 @@
 import os
 import sys
-import time
-
-# ── DEBUG: what env vars does this process actually see at boot? ──────
-print(f"[write_env] PID={os.getpid()} sees {len(os.environ)} env vars", flush=True)
-print(f"[write_env] ALL KEYS: {sorted(os.environ.keys())}", flush=True)
-for k in ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "ANTHROPIC_API_KEY", "TELEGRAM_BOT_TOKEN", "HERMES_MODEL"]:
-    v = os.environ.get(k)
-    if v is None:
-        print(f"[write_env] {k} = <MISSING>", flush=True)
-    else:
-        # show length + first/last 4 chars, never the full secret
-        shown = f"{v[:4]}...{v[-4:]}" if len(v) > 10 else "<short>"
-        print(f"[write_env] {k} len={len(v)} preview={shown}", flush=True)
-
-# ── Wait for env vars if needed (NodeOps sometimes injects them late) ─
-_REQUIRED = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
-for attempt in range(4):  # check immediately, then retry 3 times
-    if all(k in os.environ for k in _REQUIRED):
-        break
-    if attempt == 0:
-        print("[write_env] Supabase env vars not found yet, waiting for NodeOps injection...", flush=True)
-    time.sleep(3)
-    # Re-read /proc/self/environ in case vars were injected after process start
-    try:
-        with open("/proc/self/environ", "rb") as f:
-            for entry in f.read().split(b"\0"):
-                if b"=" in entry:
-                    k, v = entry.decode("utf-8", errors="replace").split("=", 1)
-                    if k not in os.environ:
-                        os.environ[k] = v
-    except Exception:
-        pass
 
 # ── Write .env files from environment ─────────────────────────────────
 env_content = ""
@@ -45,6 +13,11 @@ for k in [
     "TELEGRAM_WEBHOOK_PORT",
     "SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
+    "POSTGRES_HOST",
+    "POSTGRES_PORT",
+    "POSTGRES_USER",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_DB",
 ]:
     if k in os.environ:
         env_content += f"{k}={os.environ[k]}\n"
@@ -82,10 +55,9 @@ You are a Pokemon card trading intelligence agent. Your primary job is to monito
 """)
 
 # ── Create message-persistence hook ──────────────────────────────────
-# Container resets on every deploy, so we write hook files at startup.
-# The handler reads credentials from os.environ (or /root/.hermes/.env as
-# a fallback) at call time, so it works even if a worker process re-imports
-# the module later with a different os.environ view.
+# Uses asyncpg with POSTGRES_* vars (reliably injected by NodeOps)
+# instead of the Supabase SDK (SUPABASE_URL is NOT reliably injected).
+# Credentials are baked in because the gateway overwrites os.environ.
 hook_dir = "/root/.hermes/hooks/supabase-messages"
 os.makedirs(hook_dir, exist_ok=True)
 
@@ -98,121 +70,101 @@ events:
   - agent:end
 """)
 
-_sb_url = os.environ.get("SUPABASE_URL", "")
-_sb_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-print(f"[write_env] SUPABASE_URL={'set' if _sb_url else 'MISSING'}, SERVICE_ROLE_KEY={'set' if _sb_key else 'MISSING'}", flush=True)
+_pg_host = os.environ.get("POSTGRES_HOST", "")
+_pg_port = os.environ.get("POSTGRES_PORT", "5432")
+_pg_user = os.environ.get("POSTGRES_USER", "")
+_pg_pass = os.environ.get("POSTGRES_PASSWORD", "")
+_pg_db = os.environ.get("POSTGRES_DB", "")
+
+if _pg_host:
+    print(f"[write_env] Postgres: host={_pg_host}, port={_pg_port}, db={_pg_db}, user={_pg_user}", flush=True)
+else:
+    print("[write_env] WARNING: POSTGRES_HOST not found — message persistence will not work", flush=True)
 
 with open(os.path.join(hook_dir, "handler.py"), "w") as f:
-    f.write('''"""
-Supabase message persistence hook.
-Reads credentials from os.environ first, falls back to /root/.hermes/.env.
-No credentials are baked into this file.
+    f.write(f'''"""
+Supabase message persistence hook — uses asyncpg (direct Postgres).
+Credentials baked in by write_env.py at container startup.
 """
-import os
+import asyncio
 from datetime import datetime, timezone
 
-_client = None
+_PG_HOST = "{_pg_host}"
+_PG_PORT = "{_pg_port}"
+_PG_USER = "{_pg_user}"
+_PG_PASS = "{_pg_pass}"
+_PG_DB   = "{_pg_db}"
+_pool = None
 
 
-def _read_dotenv(path):
-    """Parse a simple KEY=VALUE .env file, ignoring blanks and comments."""
-    result = {}
-    try:
-        with open(path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                result[k.strip()] = v.strip()
-    except Exception:
-        pass
-    return result
-
-
-def _resolve_creds():
-    """Try os.environ, then /root/.hermes/.env. Return (url, key, source)."""
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-    if url and key:
-        return url, key, "env"
-    env_vars = _read_dotenv("/root/.hermes/.env")
-    url = url or env_vars.get("SUPABASE_URL")
-    key = key or env_vars.get("SUPABASE_SERVICE_ROLE_KEY")
-    if url and key:
-        return url, key, "dotenv"
-    return None, None, "none"
-
-
-def _get_client():
-    global _client
-    if _client is not None:
-        return _client
-    url, key, source = _resolve_creds()
-    if not url or not key:
-        print(f"[supabase-messages] No credentials found (PID={os.getpid()}, source={source})", flush=True)
+async def _get_pool():
+    global _pool
+    if _pool is not None:
+        return _pool
+    if not _PG_HOST or not _PG_USER:
+        print("[supabase-messages] No Postgres credentials baked in", flush=True)
         return None
     try:
-        from supabase import create_client
-        _client = create_client(url, key)
-        print(f"[supabase-messages] Connected (PID={os.getpid()}, source={source})", flush=True)
-        return _client
+        import asyncpg
+        _pool = await asyncpg.create_pool(
+            host=_PG_HOST, port=int(_PG_PORT),
+            user=_PG_USER, password=_PG_PASS,
+            database=_PG_DB, min_size=1, max_size=2,
+        )
+        print(f"[supabase-messages] Connected to Postgres at {{_PG_HOST}}:{{_PG_PORT}}/{{_PG_DB}}", flush=True)
+        return _pool
     except Exception as e:
-        print(f"[supabase-messages] Failed to create client: {e}", flush=True)
+        print(f"[supabase-messages] Failed to connect: {{e}}", flush=True)
         return None
 
 
-def _save_message(chat_id, role, content):
-    client = _get_client()
-    if not client or not content:
+async def _save_message(chat_id, role, content):
+    pool = await _get_pool()
+    if not pool or not content:
         return
     try:
         chat_id_int = int(chat_id) if chat_id else 0
     except (ValueError, TypeError):
         chat_id_int = 0
     try:
-        client.table("hermes_messages").insert({
-            "chat_id": chat_id_int,
-            "role": role,
-            "content": content,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
-        print(f"[supabase-messages] Saved {role} message (chat {chat_id_int})", flush=True)
+        await pool.execute(
+            "INSERT INTO hermes_messages (chat_id, role, content, created_at) VALUES ($1, $2, $3, $4)",
+            chat_id_int, role, content, datetime.now(timezone.utc),
+        )
+        print(f"[supabase-messages] Saved {{role}} message (chat {{chat_id_int}})", flush=True)
     except Exception as e:
-        print(f"[supabase-messages] Insert failed: {e}", flush=True)
+        print(f"[supabase-messages] Insert failed: {{e}}", flush=True)
 
 
 async def handle(event_type, context):
-    print(f"[supabase-messages] Hook fired: {event_type} (PID={os.getpid()})", flush=True)
+    print(f"[supabase-messages] Hook fired: {{event_type}}", flush=True)
 
     if event_type == "gateway:startup":
-        # ── Startup self-test: connect + insert a test row ──
         print("[supabase-messages] Running startup self-test...", flush=True)
-        client = _get_client()
-        if client:
+        pool = await _get_pool()
+        if pool:
             try:
-                client.table("hermes_messages").insert({
-                    "chat_id": 0,
-                    "role": "assistant",
-                    "content": "startup-test: hook connected successfully",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }).execute()
-                print("[supabase-messages] STARTUP TEST OK — row inserted into hermes_messages", flush=True)
+                await pool.execute(
+                    "INSERT INTO hermes_messages (chat_id, role, content, created_at) VALUES ($1, $2, $3, $4)",
+                    0, "assistant", "startup-test: asyncpg connected successfully",
+                    datetime.now(timezone.utc),
+                )
+                print("[supabase-messages] STARTUP TEST OK — row inserted", flush=True)
             except Exception as e:
-                print(f"[supabase-messages] STARTUP TEST FAILED — insert error: {e}", flush=True)
+                print(f"[supabase-messages] STARTUP TEST FAILED — insert error: {{e}}", flush=True)
         else:
-            print("[supabase-messages] STARTUP TEST FAILED — no client", flush=True)
+            print("[supabase-messages] STARTUP TEST FAILED — no pool", flush=True)
         return
 
     chat_id = context.get("user_id") or context.get("session_id") or "0"
     if event_type == "agent:start":
         message = context.get("message", "")
         if message:
-            _save_message(chat_id, "user", message)
+            await _save_message(chat_id, "user", message)
     elif event_type == "agent:end":
         response = context.get("response", "")
         if response:
-            _save_message(chat_id, "assistant", response)
+            await _save_message(chat_id, "assistant", response)
 ''')
 
 print("[write_env] Created supabase-messages hook", flush=True)
