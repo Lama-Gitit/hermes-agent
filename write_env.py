@@ -83,8 +83,9 @@ You are a Pokemon card trading intelligence agent. Your primary job is to monito
 
 # ── Create message-persistence hook ──────────────────────────────────
 # Container resets on every deploy, so we write hook files at startup.
-# Credentials are baked into handler.py because the gateway overwrites
-# os.environ during startup.
+# The handler reads credentials from os.environ (or /root/.hermes/.env as
+# a fallback) at call time, so it works even if a worker process re-imports
+# the module later with a different os.environ view.
 hook_dir = "/root/.hermes/hooks/supabase-messages"
 os.makedirs(hook_dir, exist_ok=True)
 
@@ -102,30 +103,62 @@ _sb_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 print(f"[write_env] SUPABASE_URL={'set' if _sb_url else 'MISSING'}, SERVICE_ROLE_KEY={'set' if _sb_key else 'MISSING'}", flush=True)
 
 with open(os.path.join(hook_dir, "handler.py"), "w") as f:
-    f.write(f'''"""
+    f.write('''"""
 Supabase message persistence hook.
-Credentials baked in by write_env.py at container startup.
+Reads credentials from os.environ first, falls back to /root/.hermes/.env.
+No credentials are baked into this file.
 """
+import os
 from datetime import datetime, timezone
 
-_SUPABASE_URL = "{_sb_url}"
-_SUPABASE_KEY = "{_sb_key}"
 _client = None
+
+
+def _read_dotenv(path):
+    """Parse a simple KEY=VALUE .env file, ignoring blanks and comments."""
+    result = {}
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                result[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return result
+
+
+def _resolve_creds():
+    """Try os.environ, then /root/.hermes/.env. Return (url, key, source)."""
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if url and key:
+        return url, key, "env"
+    env_vars = _read_dotenv("/root/.hermes/.env")
+    url = url or env_vars.get("SUPABASE_URL")
+    key = key or env_vars.get("SUPABASE_SERVICE_ROLE_KEY")
+    if url and key:
+        return url, key, "dotenv"
+    return None, None, "none"
+
 
 def _get_client():
     global _client
     if _client is not None:
         return _client
-    if not _SUPABASE_URL or not _SUPABASE_KEY:
-        print("[supabase-messages] Credentials not baked in — check write_env.py", flush=True)
+    url, key, source = _resolve_creds()
+    if not url or not key:
+        print(f"[supabase-messages] No credentials found (PID={os.getpid()}, source={source})", flush=True)
         return None
     try:
         from supabase import create_client
-        _client = create_client(_SUPABASE_URL, _SUPABASE_KEY)
-        print(f"[supabase-messages] Connected to {{_SUPABASE_URL}}", flush=True)
+        _client = create_client(url, key)
+        print(f"[supabase-messages] Connected (PID={os.getpid()}, source={source})", flush=True)
         return _client
     except Exception as e:
-        print(f"[supabase-messages] Failed to create client: {{e}}", flush=True)
+        print(f"[supabase-messages] Failed to create client: {e}", flush=True)
         return None
 
 
@@ -138,19 +171,19 @@ def _save_message(chat_id, role, content):
     except (ValueError, TypeError):
         chat_id_int = 0
     try:
-        client.table("hermes_messages").insert({{
+        client.table("hermes_messages").insert({
             "chat_id": chat_id_int,
             "role": role,
             "content": content,
             "created_at": datetime.now(timezone.utc).isoformat(),
-        }}).execute()
-        print(f"[supabase-messages] Saved {{role}} message (chat {{chat_id_int}})", flush=True)
+        }).execute()
+        print(f"[supabase-messages] Saved {role} message (chat {chat_id_int})", flush=True)
     except Exception as e:
-        print(f"[supabase-messages] Insert failed: {{e}}", flush=True)
+        print(f"[supabase-messages] Insert failed: {e}", flush=True)
 
 
 async def handle(event_type, context):
-    print(f"[supabase-messages] Hook fired: {{event_type}}", flush=True)
+    print(f"[supabase-messages] Hook fired: {event_type} (PID={os.getpid()})", flush=True)
 
     if event_type == "gateway:startup":
         # ── Startup self-test: connect + insert a test row ──
@@ -158,15 +191,15 @@ async def handle(event_type, context):
         client = _get_client()
         if client:
             try:
-                client.table("hermes_messages").insert({{
+                client.table("hermes_messages").insert({
                     "chat_id": 0,
                     "role": "assistant",
                     "content": "startup-test: hook connected successfully",
                     "created_at": datetime.now(timezone.utc).isoformat(),
-                }}).execute()
+                }).execute()
                 print("[supabase-messages] STARTUP TEST OK — row inserted into hermes_messages", flush=True)
             except Exception as e:
-                print(f"[supabase-messages] STARTUP TEST FAILED — insert error: {{e}}", flush=True)
+                print(f"[supabase-messages] STARTUP TEST FAILED — insert error: {e}", flush=True)
         else:
             print("[supabase-messages] STARTUP TEST FAILED — no client", flush=True)
         return
