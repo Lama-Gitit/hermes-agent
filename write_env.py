@@ -73,16 +73,31 @@ events:
   - agent:end
 """)
 
-_pg_host = os.environ.get("POSTGRES_HOST", "")
-_pg_port = os.environ.get("POSTGRES_PORT", "5432")
-_pg_user = os.environ.get("POSTGRES_USER", "")
-_pg_pass = os.environ.get("POSTGRES_PASSWORD", "")
-_pg_db = os.environ.get("POSTGRES_DB", "")
+# Detection for NodeOps / generic DB vars
+_pg_host = os.environ.get("POSTGRES_HOST") or os.environ.get("DB_HOST") or ""
+_pg_port = os.environ.get("POSTGRES_PORT") or os.environ.get("DB_PORT") or "5432"
+_pg_user = os.environ.get("POSTGRES_USER") or os.environ.get("DB_USER") or ""
+_pg_pass = os.environ.get("POSTGRES_PASSWORD") or os.environ.get("DB_PASS") or ""
+_pg_db = os.environ.get("POSTGRES_DB") or os.environ.get("DB_NAME") or os.environ.get("DB_DATABASE") or ""
+
+# Fallback to parsing DATABASE_URL if host is still empty
+if not _pg_host and os.environ.get("DATABASE_URL"):
+    try:
+        from urllib.parse import urlparse
+        url = urlparse(os.environ.get("DATABASE_URL"))
+        _pg_host = url.hostname or ""
+        _pg_port = str(url.port or "5432")
+        _pg_user = url.username or ""
+        _pg_pass = url.password or ""
+        _pg_db = url.path.lstrip("/") or ""
+        print(f"[write_env] Detected DB from DATABASE_URL: host={_pg_host}", flush=True)
+    except Exception as e:
+        print(f"[write_env] Failed to parse DATABASE_URL: {e}", flush=True)
 
 if _pg_host:
     print(f"[write_env] Postgres: host={_pg_host}, port={_pg_port}, db={_pg_db}, user={_pg_user}", flush=True)
 else:
-    print("[write_env] WARNING: POSTGRES_HOST not found — message persistence will not work", flush=True)
+    print("[write_env] WARNING: No database host found (checked POSTGRES_HOST, DB_HOST, DATABASE_URL). Message persistence will not work.", flush=True)
 
 with open(os.path.join(hook_dir, "handler.py"), "w") as f:
     f.write(f'''"""
