@@ -1,6 +1,9 @@
 import os
 import sys
 
+# DEBUG: Print all available env keys to see what NodeOps is providing
+print(f"[write_env] Available environment keys: {list(os.environ.keys())}", flush=True)
+
 # ── Write .env files from environment ─────────────────────────────────
 env_content = ""
 for k in [
@@ -19,6 +22,13 @@ for k in [
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
     "POSTGRES_DB",
+    "DATABASE_URL",
+    "DB_HOST",
+    "DB_PORT",
+    "DB_USER",
+    "DB_PASS",
+    "DB_NAME",
+    "DB_DATABASE",
     "VENICE_API_KEY",
     "VENICE_BASE_URL",
 ]:
