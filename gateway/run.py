@@ -349,8 +349,9 @@ def _resolve_runtime_agent_kwargs() -> dict:
     )
 
     try:
+        requested = os.getenv("HERMES_INFERENCE_PROVIDER") or os.getenv("HERMES_PROVIDER")
         runtime = resolve_runtime_provider(
-            requested=os.getenv("HERMES_INFERENCE_PROVIDER"),
+            requested=requested,
         )
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
@@ -471,6 +472,12 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     back to the hardcoded default which fails when the active provider is
     openai-codex.
     """
+    # Honor HERMES_MODEL environment variable as top priority override.
+    # This allows NodeOps dashboard settings to take precedence over config.yaml.
+    env_model = os.getenv("HERMES_MODEL", "").strip()
+    if env_model:
+        return env_model
+
     cfg = config if config is not None else _load_gateway_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, str):

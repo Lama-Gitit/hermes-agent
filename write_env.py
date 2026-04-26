@@ -5,6 +5,7 @@ import sys
 env_content = ""
 for k in [
     "ANTHROPIC_API_KEY",
+    "HERMES_INFERENCE_PROVIDER",
     "HERMES_PROVIDER",
     "HERMES_MODEL",
     "TELEGRAM_BOT_TOKEN",
@@ -17,6 +18,7 @@ for k in [
     "POSTGRES_PORT",
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
+    "POSTGRES_DB",
     "VENICE_API_KEY",
     "VENICE_BASE_URL",
 ]:

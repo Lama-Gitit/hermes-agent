@@ -119,6 +119,7 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "opencode-go": "glm-5",
     "kilocode": "google/gemini-3-flash-preview",
     "ollama-cloud": "nemotron-3-nano:30b",
+    "venice": "kimi-k2-6",
 }
 
 # Vision-specific model overrides for direct providers.
@@ -128,6 +129,7 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
 _PROVIDER_VISION_MODELS: Dict[str, str] = {
     "xiaomi": "mimo-v2-omni",
     "zai": "glm-5v-turbo",
+    "venice": "kimi-k2-6",
 }
 
 # OpenRouter app attribution headers
