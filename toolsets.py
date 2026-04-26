@@ -62,6 +62,8 @@ _HERMES_CORE_TOOLS = [
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
     # Supabase TCG knowledge base (gated on SUPABASE_URL via check_fn)
     "save_entry", "query_entries", "list_sources", "add_source",
+    # Marketplace ingestion (gated on SUPABASE_URL via check_fn)
+    "run_ingestion", "seed_marketplace_sources",
 ]
 
 
@@ -135,8 +137,11 @@ TOOLSETS = {
     },
 
     "supabase_tcg": {
-        "description": "Pokémon TCG knowledge base — save/query card entries and manage watched sources via Supabase",
-        "tools": ["save_entry", "query_entries", "list_sources", "add_source"],
+        "description": "Pokémon TCG knowledge base — save/query card entries, manage watched sources, and run marketplace ingestion via Supabase",
+        "tools": [
+            "save_entry", "query_entries", "list_sources", "add_source",
+            "run_ingestion", "seed_marketplace_sources",
+        ],
         "includes": []
     },
     
