@@ -8,7 +8,20 @@ Registers four tools via the Hermes tool registry:
   - add_source     : register a new watched source
 
 All tools are gated on SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY being set.
+
+NOTE: We piggyback the marketplace ingestion package onto this module's
+auto-discovery. Hermes Agent auto-imports top-level files in `tools/`
+but does NOT recurse into subdirectories like `tools/fetchers/`. Importing
+`tools.marketplace_ingestion` here ensures the fetcher framework's
+@register decorators and registry.register() calls (run_ingestion,
+seed_marketplace_sources) execute inside the gateway's Python process.
+Without this line they only show up if something else imports them.
 """
+
+# Side-effect import: registers run_ingestion + seed_marketplace_sources
+# tools and the 8 marketplace adapters. Must come before logging setup so
+# import errors are loud during container startup.
+import tools.marketplace_ingestion  # noqa: F401
 
 import json
 import logging
