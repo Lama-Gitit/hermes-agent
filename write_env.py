@@ -228,16 +228,5 @@ async def handle(event_type, context):
         await _save_message(getattr(event, "chat_id", None), "assistant", response)
 ''')
 
-    chat_id = context.get("user_id") or context.get("session_id") or "0"
-    if event_type == "agent:start":
-        message = context.get("message", "")
-        if message:
-            await _save_message(chat_id, "user", message)
-    elif event_type == "agent:end":
-        response = context.get("response", "")
-        if response:
-            await _save_message(chat_id, "assistant", response)
-''')
-
 print("[write_env] Created supabase-messages hook", flush=True)
 os.execvp(sys.executable, [sys.executable, "gateway/run.py"])
