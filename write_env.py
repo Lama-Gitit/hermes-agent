@@ -31,6 +31,13 @@ for k in [
     "DB_DATABASE",
     "VENICE_API_KEY",
     "VENICE_BASE_URL",
+    # Marketplace / ingestion adapter keys — all optional. Adapters that
+    # require a missing key degrade to status='skipped' without crashing.
+    "ALCHEMY_POLYGON_API_KEY",
+    "EBAY_OAUTH_TOKEN",
+    "TCGPLAYER_BEARER_TOKEN",
+    "POKEMONPRICETRACKER_API_KEY",
+    "COURTYARD_API_KEY",
 ]:
     if k in os.environ:
         env_content += f"{k}={os.environ[k]}\n"
@@ -199,6 +206,30 @@ async def _save_message(chat_id, role, content):
         print(f"[supabase-messages] Insert failed ({{type}}): {{e}}", flush=True)
 
 
+# ── Defensive context extraction ────────────────────────────────────
+# Hermes versions vary in the shape of the context payload passed to hooks.
+# Older versions used flat keys (context["message"], context["response"], context["user_id"]).
+# Some newer paths nest data under context["event"] as an object with attrs.
+# We try both shapes so the handler keeps working across versions.
+def _pick(ctx, *keys):
+    """Try a list of keys against ctx (dict) and ctx['event'] (dict or obj)."""
+    if isinstance(ctx, dict):
+        for k in keys:
+            v = ctx.get(k)
+            if v not in (None, ""):
+                return v
+        ev = ctx.get("event")
+        if ev is not None:
+            for k in keys:
+                if isinstance(ev, dict):
+                    v = ev.get(k)
+                else:
+                    v = getattr(ev, k, None)
+                if v not in (None, ""):
+                    return v
+    return None
+
+
 async def handle(event_type, context):
     print(f"[supabase-messages] Hook fired: {{event_type}}", flush=True)
 
@@ -215,17 +246,27 @@ async def handle(event_type, context):
             print("[supabase-messages] STARTUP TEST FAILED — no connection", flush=True)
         return
 
-    # Extract info from context
-    event = context.get("event")
-    if not event:
-        return
+    # Diagnostic: log the actual context shape so we can adapt if Hermes changes again.
+    try:
+        ctx_keys = list(context.keys()) if hasattr(context, "keys") else f"<{{type(context).__name__}}>"
+    except Exception as e:
+        ctx_keys = f"<err: {{e}}>"
+    print(f"[supabase-messages] {{event_type}} context keys: {{ctx_keys}}", flush=True)
 
-    # Handle agent events
+    chat_id = _pick(context, "chat_id", "user_id", "session_id") or 0
+
     if event_type == "agent:start":
-        await _save_message(getattr(event, "chat_id", None), "user", getattr(event, "text", ""))
+        text = _pick(context, "message", "text", "content", "input")
+        if text:
+            await _save_message(chat_id, "user", text)
+        else:
+            print(f"[supabase-messages] agent:start — no user text in context (chat_id={{chat_id}})", flush=True)
     elif event_type == "agent:end":
-        response = context.get("response", "")
-        await _save_message(getattr(event, "chat_id", None), "assistant", response)
+        text = _pick(context, "response", "output", "text", "content", "message")
+        if text:
+            await _save_message(chat_id, "assistant", text)
+        else:
+            print(f"[supabase-messages] agent:end — no assistant text in context (chat_id={{chat_id}})", flush=True)
 ''')
 
 print("[write_env] Created supabase-messages hook", flush=True)
