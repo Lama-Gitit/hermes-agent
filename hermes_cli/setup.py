@@ -108,6 +108,9 @@ _DEFAULT_PROVIDER_MODELS = {
         "Qwen/Qwen3-Coder-480B-A35B-Instruct", "deepseek-ai/DeepSeek-R1-0528",
         "deepseek-ai/DeepSeek-V3.2", "moonshotai/Kimi-K2.5",
     ],
+    "venice": [
+        "kimi-k2-6", "grok-imagine-image", "llama-3.3-70b", "llama-3.2-3b",
+    ],
 }
 
 

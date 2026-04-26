@@ -17,7 +17,8 @@ for k in [
     "POSTGRES_PORT",
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
-    "POSTGRES_DB",
+    "VENICE_API_KEY",
+    "VENICE_BASE_URL",
 ]:
     if k in os.environ:
         env_content += f"{k}={os.environ[k]}\n"

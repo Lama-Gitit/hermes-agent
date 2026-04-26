@@ -26,6 +26,7 @@ import os
 import datetime
 import threading
 import uuid
+import httpx
 from typing import Any, Dict, Optional, Union
 from urllib.parse import urlencode
 
@@ -577,6 +578,63 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
 
 
 # ---------------------------------------------------------------------------
+# Venice.ai Image Generation
+# ---------------------------------------------------------------------------
+def _generate_venice_image(prompt: str, model: str, aspect_ratio: str = "landscape", seed: Optional[int] = None) -> Dict[str, Any]:
+    """Generate an image via Venice.ai's dedicated image generation endpoint."""
+    api_key = os.getenv("VENICE_API_KEY")
+    if not api_key:
+        from hermes_cli.config import get_env_value
+        api_key = get_env_value("VENICE_API_KEY")
+    
+    if not api_key:
+        raise ValueError("VENICE_API_KEY not set")
+
+    base_url = os.getenv("VENICE_BASE_URL", "https://api.venice.ai/api/v1").rstrip("/")
+    url = f"{base_url}/image/generate"
+
+    # Map aspect ratio to dimensions
+    dims = {"landscape": (1280, 720), "square": (1024, 1024), "portrait": (720, 1280)}
+    width, height = dims.get(aspect_ratio.lower(), (1024, 1024))
+
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "safe_filter": True,
+        "return_binary": False
+    }
+    if seed is not None:
+        payload["seed"] = seed
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    logger.info("Generating Venice image with %s — prompt: %s", model, prompt[:80])
+    resp = httpx.post(url, headers=headers, json=payload, timeout=60.0)
+    resp.raise_for_status()
+    data = resp.json()
+
+    if "images" not in data or not data["images"]:
+        raise ValueError("No images returned from Venice API")
+
+    # Venice usually returns a list of objects or strings (URLs)
+    img_data = data["images"][0]
+    url = img_data if isinstance(img_data, str) else img_data.get("url")
+    
+    if not url:
+        raise ValueError("No image URL found in Venice response")
+
+    return {
+        "success": True,
+        "image": url
+    }
+
+
+# ---------------------------------------------------------------------------
 # Tool entry point
 # ---------------------------------------------------------------------------
 def image_generate_tool(
@@ -598,6 +656,19 @@ def image_generate_tool(
     Returns a JSON string with ``{"success": bool, "image": url | None,
     "error": str, "error_type": str}``.
     """
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        provider = cfg.get("model", {}).get("provider") if isinstance(cfg, dict) else None
+        
+        if provider == "venice":
+            model = cfg.get("model", {}).get("image_model", "grok-imagine-image")
+            result = _generate_venice_image(prompt, model, aspect_ratio, seed)
+            return json.dumps(result, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        logger.debug("Venice image generation branch failed: %s", exc)
+        # Fall through to FAL if Venice fails or is not configured
+
     model_id, meta = _resolve_fal_model()
 
     debug_call_data = {
@@ -738,11 +809,16 @@ def check_fal_api_key() -> bool:
 
 
 def check_image_generation_requirements() -> bool:
-    """True if FAL credentials and fal_client SDK are both available."""
+    """True if FAL or Venice credentials and required SDKs are available."""
+    # Venice only needs httpx (which we added to the file)
+    if os.getenv("VENICE_API_KEY"):
+        return True
+
+    # FAL requires the SDK
     try:
         if not check_fal_api_key():
             return False
-        import fal_client  # noqa: F401 — SDK presence check
+        import fal_client  # noqa: F401
         return True
     except ImportError:
         return False

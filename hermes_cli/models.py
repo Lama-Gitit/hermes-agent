@@ -168,6 +168,13 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "z-ai/glm5",
         "openai/gpt-oss-120b",
     ],
+    "venice": [
+        "kimi-k2-6",
+        "grok-imagine-image",
+        "llama-3.3-70b",
+        "llama-3.2-3b",
+        "llama-3.1-405b",
+    ],
     "kimi-coding": [
         "kimi-k2.5",
         "kimi-for-coding",
@@ -550,6 +557,7 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
     ProviderEntry("openai-codex",   "OpenAI Codex",             "OpenAI Codex"),
     ProviderEntry("xiaomi",         "Xiaomi MiMo",              "Xiaomi MiMo (MiMo-V2 models — pro, omni, flash)"),
     ProviderEntry("nvidia",         "NVIDIA NIM",               "NVIDIA NIM (Nemotron models — build.nvidia.com or local NIM)"),
+    ProviderEntry("venice",         "Venice.ai",                "Venice.ai (Private & Permissionless AI — kimi-k2-6, grok-imagine)"),
     ProviderEntry("qwen-oauth",     "Qwen OAuth (Portal)",      "Qwen OAuth (reuses local Qwen CLI login)"),
     ProviderEntry("copilot",        "GitHub Copilot",           "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)"),
     ProviderEntry("copilot-acp",    "GitHub Copilot ACP",       "GitHub Copilot ACP (spawns `copilot --acp --stdio`)"),
