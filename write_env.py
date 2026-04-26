@@ -84,13 +84,17 @@ events:
 """)
 
 # Detection for NodeOps / generic DB vars
+_pg_url = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL") or os.environ.get("POSTGRESQL_URL") or ""
 _pg_host = os.environ.get("POSTGRES_HOST") or os.environ.get("DB_HOST") or ""
 _pg_port = os.environ.get("POSTGRES_PORT") or os.environ.get("DB_PORT") or "5432"
 _pg_user = os.environ.get("POSTGRES_USER") or os.environ.get("DB_USER") or ""
 _pg_pass = os.environ.get("POSTGRES_PASSWORD") or os.environ.get("DB_PASS") or ""
 _pg_db = os.environ.get("POSTGRES_DB") or os.environ.get("DB_NAME") or os.environ.get("DB_DATABASE") or ""
 
-# Fallback to parsing DATABASE_URL if host is still empty
+_sb_url = os.environ.get("SUPABASE_URL", "")
+_sb_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+
+# Fallback to parsing URL if host is still empty
 if not _pg_host and os.environ.get("DATABASE_URL"):
     try:
         from urllib.parse import urlparse
@@ -100,18 +104,19 @@ if not _pg_host and os.environ.get("DATABASE_URL"):
         _pg_user = url.username or ""
         _pg_pass = url.password or ""
         _pg_db = url.path.lstrip("/") or ""
-        print(f"[write_env] Detected DB from DATABASE_URL: host={_pg_host}", flush=True)
-    except Exception as e:
-        print(f"[write_env] Failed to parse DATABASE_URL: {e}", flush=True)
+    except Exception:
+        pass
 
 if _pg_host:
     print(f"[write_env] Postgres: host={_pg_host}, port={_pg_port}, db={_pg_db}, user={_pg_user}", flush=True)
+elif _sb_url:
+    print(f"[write_env] Supabase: url={_sb_url}", flush=True)
 else:
-    print("[write_env] WARNING: No database host found (checked POSTGRES_HOST, DB_HOST, DATABASE_URL). Message persistence will not work.", flush=True)
+    print("[write_env] WARNING: No database found (checked POSTGRES, DB_HOST, DATABASE_URL, SUPABASE_URL). Message persistence will not work.", flush=True)
 
 with open(os.path.join(hook_dir, "handler.py"), "w") as f:
     f.write(f'''"""
-Supabase message persistence hook — uses asyncpg (direct Postgres).
+Supabase message persistence hook — uses direct Postgres or Supabase SDK.
 Credentials baked in by write_env.py at container startup.
 """
 import asyncio
@@ -122,46 +127,76 @@ _PG_PORT = "{_pg_port}"
 _PG_USER = "{_pg_user}"
 _PG_PASS = "{_pg_pass}"
 _PG_DB   = "{_pg_db}"
+
+_SB_URL  = "{_sb_url}"
+_SB_KEY  = "{_sb_key}"
+
 _pool = None
+_client = None
 
 
-async def _get_pool():
-    global _pool
+async def _get_client():
+    global _pool, _client
     if _pool is not None:
-        return _pool
-    if not _PG_HOST or not _PG_USER:
-        print("[supabase-messages] No Postgres credentials baked in", flush=True)
-        return None
-    try:
-        import asyncpg
-        _pool = await asyncpg.create_pool(
-            host=_PG_HOST, port=int(_PG_PORT),
-            user=_PG_USER, password=_PG_PASS,
-            database=_PG_DB, min_size=1, max_size=2,
-        )
-        print(f"[supabase-messages] Connected to Postgres at {{_PG_HOST}}:{{_PG_PORT}}/{{_PG_DB}}", flush=True)
-        return _pool
-    except Exception as e:
-        print(f"[supabase-messages] Failed to connect: {{e}}", flush=True)
-        return None
+        return _pool, "postgres"
+    if _client is not None:
+        return _client, "supabase"
+
+    # Try Postgres first
+    if _PG_HOST and _PG_USER:
+        try:
+            import asyncpg
+            _pool = await asyncpg.create_pool(
+                host=_PG_HOST, port=int(_PG_PORT),
+                user=_PG_USER, password=_PG_PASS,
+                database=_PG_DB, min_size=1, max_size=2,
+            )
+            print(f"[supabase-messages] Connected via direct Postgres", flush=True)
+            return _pool, "postgres"
+        except Exception as e:
+            print(f"[supabase-messages] Postgres connection failed: {{e}}", flush=True)
+
+    # Fallback to Supabase SDK
+    if _SB_URL and _SB_KEY:
+        try:
+            from supabase import create_client
+            _client = create_client(_SB_URL, _SB_KEY)
+            print(f"[supabase-messages] Connected via Supabase API", flush=True)
+            return _client, "supabase"
+        except Exception as e:
+            print(f"[supabase-messages] Supabase API connection failed: {{e}}", flush=True)
+
+    return None, None
 
 
 async def _save_message(chat_id, role, content):
-    pool = await _get_pool()
-    if not pool or not content:
+    client, type = await _get_client()
+    if not client or not content:
         return
     try:
         chat_id_int = int(chat_id) if chat_id else 0
     except (ValueError, TypeError):
         chat_id_int = 0
+
+    data = {{
+        "chat_id": chat_id_int,
+        "role": role,
+        "content": content,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }}
+
     try:
-        await pool.execute(
-            "INSERT INTO hermes_messages (chat_id, role, content, created_at) VALUES ($1, $2, $3, $4)",
-            chat_id_int, role, content, datetime.now(timezone.utc),
-        )
+        if type == "postgres":
+            await client.execute(
+                "INSERT INTO hermes_messages (chat_id, role, content, created_at) VALUES ($1, $2, $3, $4)",
+                chat_id_int, role, content, datetime.now(timezone.utc),
+            )
+        else:
+            # Supabase SDK is synchronous
+            client.table("hermes_messages").insert(data).execute()
         print(f"[supabase-messages] Saved {{role}} message (chat {{chat_id_int}})", flush=True)
     except Exception as e:
-        print(f"[supabase-messages] Insert failed: {{e}}", flush=True)
+        print(f"[supabase-messages] Insert failed ({{type}}): {{e}}", flush=True)
 
 
 async def handle(event_type, context):
@@ -169,20 +204,29 @@ async def handle(event_type, context):
 
     if event_type == "gateway:startup":
         print("[supabase-messages] Running startup self-test...", flush=True)
-        pool = await _get_pool()
-        if pool:
+        client, type = await _get_client()
+        if client:
             try:
-                await pool.execute(
-                    "INSERT INTO hermes_messages (chat_id, role, content, created_at) VALUES ($1, $2, $3, $4)",
-                    0, "assistant", "startup-test: asyncpg connected successfully",
-                    datetime.now(timezone.utc),
-                )
-                print("[supabase-messages] STARTUP TEST OK — row inserted", flush=True)
+                await _save_message(0, "assistant", "startup-test: connected successfully via " + type)
+                print("[supabase-messages] STARTUP TEST OK", flush=True)
             except Exception as e:
-                print(f"[supabase-messages] STARTUP TEST FAILED — insert error: {{e}}", flush=True)
+                print(f"[supabase-messages] STARTUP TEST FAILED: {{e}}", flush=True)
         else:
-            print("[supabase-messages] STARTUP TEST FAILED — no pool", flush=True)
+            print("[supabase-messages] STARTUP TEST FAILED — no connection", flush=True)
         return
+
+    # Extract info from context
+    event = context.get("event")
+    if not event:
+        return
+
+    # Handle agent events
+    if event_type == "agent:start":
+        await _save_message(getattr(event, "chat_id", None), "user", getattr(event, "text", ""))
+    elif event_type == "agent:end":
+        response = context.get("response", "")
+        await _save_message(getattr(event, "chat_id", None), "assistant", response)
+''')
 
     chat_id = context.get("user_id") or context.get("session_id") or "0"
     if event_type == "agent:start":
