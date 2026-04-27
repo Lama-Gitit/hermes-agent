@@ -1,32 +1,32 @@
 """
 Supabase TCG Tools — Hermes knowledge-base persistence.
 
-Registers four tools via the Hermes tool registry:
-  - save_entry     : persist one atomic claim to hermes_entries
-  - query_entries  : search/filter past entries
-  - list_sources   : list watched sources from hermes_sources
-  - add_source     : register a new watched source
+Registers SIX tools via the Hermes tool registry:
+  - save_entry              : persist one atomic claim to hermes_entries
+  - query_entries           : search/filter past entries
+  - list_sources            : list watched sources from hermes_sources
+  - add_source              : register a new watched source
+  - run_ingestion           : run a marketplace ingestion cycle
+  - seed_marketplace_sources: idempotently seed canonical marketplace rows
 
 All tools are gated on SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY being set.
 
-NOTE: We piggyback the marketplace ingestion package onto this module's
-auto-discovery. Hermes Agent auto-imports top-level files in `tools/`
-but does NOT recurse into subdirectories like `tools/fetchers/`. Importing
-`tools.marketplace_ingestion` here ensures the fetcher framework's
-@register decorators and registry.register() calls (run_ingestion,
-seed_marketplace_sources) execute inside the gateway's Python process.
-Without this line they only show up if something else imports them.
+The last two tools are defined in `tools.fetchers.tools_api` (schemas + handlers)
+but registered here because Hermes Agent's tool loader picks up this file
+reliably, while it does NOT recurse into `tools/fetchers/` subdirectory.
+Co-locating the registration calls with the proven-working save_entry et al.
+guarantees they reach the registry at gateway startup.
 """
-
-# Side-effect import: registers run_ingestion + seed_marketplace_sources
-# tools and the 8 marketplace adapters. Must come before logging setup so
-# import errors are loud during container startup.
-import tools.marketplace_ingestion  # noqa: F401
 
 import json
 import logging
 from datetime import date, datetime
 from typing import Any, Dict
+
+# Trigger import of the fetcher package — this populates the adapter
+# REGISTRY (in tools/fetchers/base.py) with all 8 marketplace adapters
+# so the runner can find them by source_type.
+import tools.fetchers  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -413,3 +413,47 @@ registry.register(
     emoji="➕",
     description="Add a new watched source",
 )
+
+
+# ── Marketplace ingestion tools ─────────────────────────────────────────
+# Schemas + handlers live in tools/fetchers/tools_api.py, but registration
+# happens here for the same reason as above — Hermes's tool loader sees
+# this file but not the subdirectory.
+
+from tools.fetchers.tools_api import (  # noqa: E402
+    RUN_INGESTION_SCHEMA,
+    SEED_MARKETPLACE_SOURCES_SCHEMA,
+    _handle_run_ingestion,
+    _handle_seed_marketplace_sources,
+)
+
+registry.register(
+    name="run_ingestion",
+    toolset="supabase_tcg",
+    schema=RUN_INGESTION_SCHEMA,
+    handler=_handle_run_ingestion,
+    check_fn=_check_supabase,
+    emoji="📥",
+    description="Run a marketplace ingestion cycle",
+)
+
+registry.register(
+    name="seed_marketplace_sources",
+    toolset="supabase_tcg",
+    schema=SEED_MARKETPLACE_SOURCES_SCHEMA,
+    handler=_handle_seed_marketplace_sources,
+    check_fn=_check_supabase,
+    emoji="🌱",
+    description="Seed canonical marketplace sources",
+)
+
+# Sanity log — visible in deployment logs immediately after gateway startup.
+try:
+    from tools.fetchers.base import REGISTRY as _ADAPTER_REGISTRY
+    print(
+        f"[supabase_tcg] marketplace tools registered — "
+        f"{len(_ADAPTER_REGISTRY)} adapters: {sorted(_ADAPTER_REGISTRY.keys())}",
+        flush=True,
+    )
+except Exception as _e:
+    print(f"[supabase_tcg] marketplace registration WARNING: {_e}", flush=True)
