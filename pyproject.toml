@@ -36,6 +36,9 @@ dependencies = [
   "PyJWT[crypto]>=2.12.0,<3",  # CVE-2026-32597
   # Supabase (for persistent storage — TCG knowledge base)
   "supabase>=2.11.0,<3",
+  # Direct Postgres fallback for Supabase clients — used by tools/supabase_client.py
+  # when SUPABASE_URL isn't reliably injected to the gateway runtime (NodeOps).
+  "psycopg2-binary>=2.9.9,<3",
 ]
 
 [project.optional-dependencies]
