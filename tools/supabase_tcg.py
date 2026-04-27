@@ -409,21 +409,100 @@ registry.register(
 )
 
 
-# ── Marketplace ingestion tools ─────────────────────────────────────────
-# Registered at module level (same as the four tools above) because this
-# is the path that demonstrably reaches the dispatcher. The schemas and
-# handlers live in tools/fetchers/tools_api.py; we just import them and
-# register here. Importing tools.fetchers also self-loads all 8 adapter
-# classes into tools.fetchers.base.REGISTRY for the runner.
+# ── Marketplace ingestion tools (LAZY import) ───────────────────────────
+# CRITICAL: do NOT import tools.fetchers at module level. Three previous
+# deploys proved that breaks supabase_tcg.py's loading entirely — even
+# though the import works fine in subprocesses. Whatever Hermes's tool
+# loader does at startup makes that import fail silently and prevents
+# this whole file from loading.
+#
+# The fix: register the tools with handlers that defer their imports
+# until the tool is actually called. Schemas are inlined here as plain
+# dicts — no import needed for those. This keeps the module-load path
+# byte-identical to the proven-working save_entry path.
 
-import tools.fetchers  # noqa: F401, E402
+RUN_INGESTION_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "run_ingestion",
+        "description": (
+            "Run one marketplace ingestion cycle. Without arguments, runs every "
+            "enabled source in hermes_sources. Pass `source_id` to target a single "
+            "row, or `source_types=['courtyard_opensea', ...]` to run only adapters "
+            "of those types. Returns per-source summaries (items_found, "
+            "entries_inserted, deduped_out, status)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "source_id": {
+                    "type": "integer",
+                    "description": "Run ingestion for just this hermes_sources.id.",
+                },
+                "source_types": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Restrict to these source_type values.",
+                },
+                "enabled_only": {
+                    "type": "boolean",
+                    "description": "When no source_id is given, only run enabled rows. Default true.",
+                },
+            },
+            "required": [],
+        },
+    },
+}
 
-from tools.fetchers.tools_api import (  # noqa: E402
-    RUN_INGESTION_SCHEMA,
-    SEED_MARKETPLACE_SOURCES_SCHEMA,
-    _handle_run_ingestion,
-    _handle_seed_marketplace_sources,
-)
+SEED_MARKETPLACE_SOURCES_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "seed_marketplace_sources",
+        "description": (
+            "Idempotently insert the canonical marketplace + vault platform rows "
+            "into hermes_sources. Safe to call repeatedly — only rows whose "
+            "(name, url) pair is missing get inserted. Returns the number of rows "
+            "added."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+
+def _handle_run_ingestion(args: Dict[str, Any], **kw) -> str:
+    """Lazy-load the fetcher framework and invoke the runner."""
+    try:
+        # Lazy imports — only when the tool is actually called, NOT at module load.
+        import tools.fetchers  # noqa: F401  — populates adapter REGISTRY
+        from tools.fetchers import runner
+
+        source_id = args.get("source_id")
+        source_types = args.get("source_types")
+        enabled_only = bool(args.get("enabled_only", True))
+
+        if source_id is not None:
+            out = runner.run_one(int(source_id))
+        else:
+            out = runner.run_all(
+                enabled_only=enabled_only,
+                only_source_types=source_types if isinstance(source_types, list) else None,
+            )
+        return json.dumps(out, default=str)
+    except Exception as e:
+        logger.error("[supabase_tcg] run_ingestion failed: %s", e)
+        return json.dumps({"error": f"run_ingestion failed: {str(e)[:500]}"})
+
+
+def _handle_seed_marketplace_sources(args: Dict[str, Any], **kw) -> str:
+    """Lazy-load and invoke the seed function."""
+    try:
+        # Lazy import — same reason as above.
+        from tools.fetchers.tools_api import _handle_seed_marketplace_sources as _seed
+        return _seed(args, **kw)
+    except Exception as e:
+        logger.error("[supabase_tcg] seed_marketplace_sources failed: %s", e)
+        return json.dumps({"error": f"seed_marketplace_sources failed: {str(e)[:500]}"})
+
 
 registry.register(
     name="run_ingestion",
