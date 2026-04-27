@@ -193,33 +193,12 @@ SEED_MARKETPLACE_SOURCES_SCHEMA = {
 
 
 # ── Registry wiring ─────────────────────────────────────────────────────────
-
-def _check_supabase():
-    from tools.supabase_client import is_available
-    return is_available()
-
-
-from tools.registry import registry  # noqa: E402
-
-registry.register(
-    name="run_ingestion",
-    toolset="supabase_tcg",
-    schema=RUN_INGESTION_SCHEMA,
-    handler=_handle_run_ingestion,
-    check_fn=_check_supabase,
-    emoji="📥",
-    description="Run a marketplace ingestion cycle",
-)
-
-registry.register(
-    name="seed_marketplace_sources",
-    toolset="supabase_tcg",
-    schema=SEED_MARKETPLACE_SOURCES_SCHEMA,
-    handler=_handle_seed_marketplace_sources,
-    check_fn=_check_supabase,
-    emoji="🌱",
-    description="Seed canonical marketplace sources",
-)
+#
+# Registration of `run_ingestion` and `seed_marketplace_sources` lives in
+# `tools/marketplace_ingestion.py` — that's the file Hermes Agent's AST-based
+# discovery (`_is_registry_register_call`) actually picks up. This module just
+# defines the schemas, handlers, and CLI entrypoint that the registration
+# imports from.
 
 
 # ── CLI entrypoint (for cron / scheduled tasks) ─────────────────────────────
