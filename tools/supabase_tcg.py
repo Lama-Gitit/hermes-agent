@@ -1,19 +1,20 @@
 """
 Supabase TCG Tools — Hermes knowledge-base persistence.
 
-Registers four tools via the Hermes tool registry:
-  - save_entry     : persist one atomic claim to hermes_entries
-  - query_entries  : search/filter past entries
-  - list_sources   : list watched sources from hermes_sources
-  - add_source     : register a new watched source
+Registers SIX tools via the Hermes tool registry:
+  - save_entry              : persist one atomic claim to hermes_entries
+  - query_entries           : search/filter past entries
+  - list_sources            : list watched sources from hermes_sources
+  - add_source              : register a new watched source
+  - run_ingestion           : run a marketplace ingestion cycle
+  - seed_marketplace_sources: idempotently seed canonical marketplace rows
 
 All tools are gated on SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY being set.
 
-NOTE: The marketplace ingestion tools (`run_ingestion`,
-`seed_marketplace_sources`) used to be registered here too, but Hermes's
-tool loader was unreliable about picking them up. They are now registered
-via a startup hook at ~/.hermes/hooks/marketplace-init/handler.py instead
-(written by write_env.py at container startup).
+The last two tools have schemas + handlers defined in
+`tools/fetchers/tools_api.py`, but registration happens here because this
+file is the one Hermes's tool loader picks up at startup (proven by
+save_entry being visible to the agent).
 """
 
 import json
@@ -405,4 +406,41 @@ registry.register(
     check_fn=_check_supabase,
     emoji="➕",
     description="Add a new watched source",
+)
+
+
+# ── Marketplace ingestion tools ─────────────────────────────────────────
+# Registered at module level (same as the four tools above) because this
+# is the path that demonstrably reaches the dispatcher. The schemas and
+# handlers live in tools/fetchers/tools_api.py; we just import them and
+# register here. Importing tools.fetchers also self-loads all 8 adapter
+# classes into tools.fetchers.base.REGISTRY for the runner.
+
+import tools.fetchers  # noqa: F401, E402
+
+from tools.fetchers.tools_api import (  # noqa: E402
+    RUN_INGESTION_SCHEMA,
+    SEED_MARKETPLACE_SOURCES_SCHEMA,
+    _handle_run_ingestion,
+    _handle_seed_marketplace_sources,
+)
+
+registry.register(
+    name="run_ingestion",
+    toolset="supabase_tcg",
+    schema=RUN_INGESTION_SCHEMA,
+    handler=_handle_run_ingestion,
+    check_fn=_check_supabase,
+    emoji="📥",
+    description="Run a marketplace ingestion cycle",
+)
+
+registry.register(
+    name="seed_marketplace_sources",
+    toolset="supabase_tcg",
+    schema=SEED_MARKETPLACE_SOURCES_SCHEMA,
+    handler=_handle_seed_marketplace_sources,
+    check_fn=_check_supabase,
+    emoji="🌱",
+    description="Seed canonical marketplace sources",
 )
