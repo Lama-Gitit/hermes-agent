@@ -1,31 +1,20 @@
 """
 Supabase TCG Tools — Hermes knowledge-base persistence.
 
-Registers SIX tools via the Hermes tool registry:
-  - save_entry              : persist one atomic claim to hermes_entries
-  - query_entries           : search/filter past entries
-  - list_sources            : list watched sources from hermes_sources
-  - add_source              : register a new watched source
-  - run_ingestion           : run a marketplace ingestion cycle
-  - seed_marketplace_sources: idempotently seed canonical marketplace rows
+Registers four tools via the Hermes tool registry:
+  - save_entry     : persist one atomic claim to hermes_entries
+  - query_entries  : search/filter past entries
+  - list_sources   : list watched sources from hermes_sources
+  - add_source     : register a new watched source
 
 All tools are gated on SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY being set.
 
-The last two tools are defined in `tools.fetchers.tools_api` (schemas + handlers)
-but registered here because Hermes Agent's tool loader picks up this file
-reliably, while it does NOT recurse into `tools/fetchers/` subdirectory.
-Co-locating the registration calls with the proven-working save_entry et al.
-guarantees they reach the registry at gateway startup.
+NOTE: The marketplace ingestion tools (`run_ingestion`,
+`seed_marketplace_sources`) used to be registered here too, but Hermes's
+tool loader was unreliable about picking them up. They are now registered
+via a startup hook at ~/.hermes/hooks/marketplace-init/handler.py instead
+(written by write_env.py at container startup).
 """
-
-# ── LOUD STARTUP DIAGNOSTICS ────────────────────────────────────────────
-# These prints run at module-import time. Search the deployment logs for
-# "[supabase_tcg]" to trace exactly how far this file got. If you see
-# "LOAD start" but not "LOAD complete", the file errored partway through
-# and the WARNING line in between will tell you where.
-import sys as _sys
-print("[supabase_tcg] LOAD start (Python pid={}, path={})".format(
-    _sys.executable, __file__), flush=True)
 
 import json
 import logging
@@ -417,83 +406,3 @@ registry.register(
     emoji="➕",
     description="Add a new watched source",
 )
-
-print("[supabase_tcg] checkpoint A: 4 base tools registered (save_entry, query_entries, list_sources, add_source)", flush=True)
-
-
-# ── Marketplace ingestion tools ─────────────────────────────────────────
-# Schemas + handlers live in tools/fetchers/tools_api.py, but registration
-# happens here for the same reason as above — Hermes's tool loader sees
-# this file but not the subdirectory.
-#
-# Wrapped in try/except so a failure registering the marketplace tools
-# does NOT regress the 4 base tools above. Whatever happens, we print
-# an informative line so the deployment log tells us exactly where the
-# wheels came off.
-
-try:
-    print("[supabase_tcg] checkpoint B: importing tools.fetchers...", flush=True)
-    import tools.fetchers  # noqa: F401, E402
-    print("[supabase_tcg] checkpoint C: tools.fetchers imported OK", flush=True)
-
-    print("[supabase_tcg] checkpoint D: importing schemas/handlers from tools_api...", flush=True)
-    from tools.fetchers.tools_api import (  # noqa: E402
-        RUN_INGESTION_SCHEMA,
-        SEED_MARKETPLACE_SOURCES_SCHEMA,
-        _handle_run_ingestion,
-        _handle_seed_marketplace_sources,
-    )
-    print("[supabase_tcg] checkpoint E: schemas/handlers imported OK", flush=True)
-
-    registry.register(
-        name="run_ingestion",
-        toolset="supabase_tcg",
-        schema=RUN_INGESTION_SCHEMA,
-        handler=_handle_run_ingestion,
-        check_fn=_check_supabase,
-        emoji="📥",
-        description="Run a marketplace ingestion cycle",
-    )
-    print("[supabase_tcg] checkpoint F: run_ingestion registered", flush=True)
-
-    registry.register(
-        name="seed_marketplace_sources",
-        toolset="supabase_tcg",
-        schema=SEED_MARKETPLACE_SOURCES_SCHEMA,
-        handler=_handle_seed_marketplace_sources,
-        check_fn=_check_supabase,
-        emoji="🌱",
-        description="Seed canonical marketplace sources",
-    )
-    print("[supabase_tcg] checkpoint G: seed_marketplace_sources registered", flush=True)
-
-    from tools.fetchers.base import REGISTRY as _ADAPTER_REGISTRY  # noqa: E402
-    print(
-        f"[supabase_tcg] checkpoint H: marketplace ALL DONE — "
-        f"{len(_ADAPTER_REGISTRY)} adapters: {sorted(_ADAPTER_REGISTRY.keys())}",
-        flush=True,
-    )
-except Exception as _e:
-    import traceback as _tb
-    print(f"[supabase_tcg] !!! marketplace registration FAILED: {_e}", flush=True)
-    print(f"[supabase_tcg] !!! traceback:\n{_tb.format_exc()}", flush=True)
-
-
-# ── Final diagnostic dump ────────────────────────────────────────────────
-# Print which tool names actually landed in the registry from this module.
-# If this line shows up but later registry queries say otherwise, we know
-# Hermes is filtering them out elsewhere (toolset gating, check_fn, etc.).
-try:
-    _all_names = []
-    for _attr in ("_tools", "_entries", "tools_dict", "_registered"):
-        _candidate = getattr(registry, _attr, None)
-        if isinstance(_candidate, dict):
-            _all_names = sorted(_candidate.keys())
-            print(f"[supabase_tcg] registry.{_attr} keys: {_all_names}", flush=True)
-            break
-    if not _all_names:
-        print(f"[supabase_tcg] registry attrs: {[a for a in dir(registry) if not a.startswith('_') or a in ('_tools','_entries')][:30]}", flush=True)
-except Exception as _e:
-    print(f"[supabase_tcg] diagnostic dump WARNING: {_e}", flush=True)
-
-print("[supabase_tcg] LOAD complete", flush=True)

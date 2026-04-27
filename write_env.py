@@ -5,6 +5,14 @@ import sys
 print(f"[write_env] Available environment keys: {list(os.environ.keys())}", flush=True)
 
 # ── Write .env files from environment ─────────────────────────────────
+# When VENICE_API_KEY is set we deliberately DO NOT pass ANTHROPIC_API_KEY
+# through, because Hermes Agent auto-detects provider keys and may silently
+# route to Anthropic even when `provider: custom` is set in config.yaml.
+_skip_keys = set()
+if os.environ.get("VENICE_API_KEY"):
+    _skip_keys.add("ANTHROPIC_API_KEY")
+    print("[write_env] Venice mode: filtering ANTHROPIC_API_KEY out of .env to prevent auto-detection", flush=True)
+
 env_content = ""
 for k in [
     "ANTHROPIC_API_KEY",
@@ -39,6 +47,8 @@ for k in [
     "POKEMONPRICETRACKER_API_KEY",
     "COURTYARD_API_KEY",
 ]:
+    if k in _skip_keys:
+        continue
     if k in os.environ:
         env_content += f"{k}={os.environ[k]}\n"
 
@@ -297,4 +307,126 @@ async def handle(event_type, context):
 ''')
 
 print("[write_env] Created supabase-messages hook", flush=True)
+
+
+# ── Marketplace ingestion bootstrap hook ─────────────────────────────
+# Hermes's tool loader doesn't reliably pick up our subdirectory-based
+# fetcher framework. So we create a hook that fires on gateway:startup
+# (inside the gateway's Python process, sharing its registry singleton)
+# and registers the run_ingestion + seed_marketplace_sources tools.
+#
+# This is the same mechanism the supabase-messages hook uses — and we
+# already know hooks fire reliably, because supabase-messages logs
+# "STARTUP TEST OK" on every deploy.
+
+mp_hook_dir = "/root/.hermes/hooks/marketplace-init"
+os.makedirs(mp_hook_dir, exist_ok=True)
+
+with open(os.path.join(mp_hook_dir, "HOOK.yaml"), "w") as f:
+    f.write("""name: marketplace-init
+description: Register run_ingestion + seed_marketplace_sources tools at gateway startup
+events:
+  - gateway:startup
+""")
+
+with open(os.path.join(mp_hook_dir, "handler.py"), "w") as f:
+    f.write('''"""
+Marketplace tools bootstrap hook.
+
+Fires on gateway:startup inside the gateway's Python process, which means
+`from tools.registry import registry` returns the SAME singleton the
+gateway uses to dispatch tool calls. Registering here makes the new tools
+available to Telegram/CLI without depending on the auto-discovery loader.
+"""
+import sys
+import traceback
+
+
+async def handle(event_type, context):
+    if event_type != "gateway:startup":
+        return
+
+    print("[marketplace-init] hook fired — registering marketplace tools...", flush=True)
+
+    # Make sure /app is on sys.path (it usually is, but be defensive).
+    if "/app" not in sys.path:
+        sys.path.insert(0, "/app")
+
+    try:
+        # Step 1: import the adapter package so all 8 FetcherAdapter
+        # classes self-register into tools.fetchers.base.REGISTRY.
+        import tools.fetchers  # noqa: F401
+        from tools.fetchers.base import REGISTRY as _ADAPTERS
+        print(
+            f"[marketplace-init] adapter REGISTRY loaded: "
+            f"{len(_ADAPTERS)} adapters: {sorted(_ADAPTERS.keys())}",
+            flush=True,
+        )
+
+        # Step 2: pull the schemas + handlers from tools_api.
+        from tools.fetchers.tools_api import (
+            RUN_INGESTION_SCHEMA,
+            SEED_MARKETPLACE_SOURCES_SCHEMA,
+            _handle_run_ingestion,
+            _handle_seed_marketplace_sources,
+        )
+        print("[marketplace-init] schemas + handlers imported", flush=True)
+
+        # Step 3: import the registry singleton and register both tools.
+        from tools.registry import registry
+
+        def _check_supabase():
+            try:
+                from tools.supabase_client import is_available
+                return is_available()
+            except Exception:
+                return False
+
+        registry.register(
+            name="run_ingestion",
+            toolset="supabase_tcg",
+            schema=RUN_INGESTION_SCHEMA,
+            handler=_handle_run_ingestion,
+            check_fn=_check_supabase,
+            emoji="\U0001F4E5",
+            description="Run a marketplace ingestion cycle",
+        )
+        print("[marketplace-init] registered: run_ingestion", flush=True)
+
+        registry.register(
+            name="seed_marketplace_sources",
+            toolset="supabase_tcg",
+            schema=SEED_MARKETPLACE_SOURCES_SCHEMA,
+            handler=_handle_seed_marketplace_sources,
+            check_fn=_check_supabase,
+            emoji="\U0001F331",
+            description="Seed canonical marketplace sources",
+        )
+        print("[marketplace-init] registered: seed_marketplace_sources", flush=True)
+
+        # Step 4: dump what registered tools the registry now knows about.
+        try:
+            for attr in ("_tools", "_entries", "tools_dict"):
+                d = getattr(registry, attr, None)
+                if isinstance(d, dict):
+                    names = sorted(d.keys())
+                    print(
+                        f"[marketplace-init] registry.{attr} now has "
+                        f"{len(names)} tools: {names}",
+                        flush=True,
+                    )
+                    break
+        except Exception as _e:
+            print(f"[marketplace-init] registry inspection skipped: {_e}", flush=True)
+
+        print("[marketplace-init] DONE", flush=True)
+
+    except Exception as e:
+        print(f"[marketplace-init] !!! FAILED: {e}", flush=True)
+        print(f"[marketplace-init] !!! traceback:\\n{traceback.format_exc()}", flush=True)
+''')
+
+print("[write_env] Created marketplace-init hook", flush=True)
+
+
 os.execvp(sys.executable, [sys.executable, "gateway/run.py"])
