@@ -24,6 +24,15 @@ from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
 
+# ── Load-time diagnostic ────────────────────────────────────────────────
+# print() goes to NodeOps deployment logs. If the "starting" line doesn't
+# appear, the file failed to import before any registration happened.
+# If "starting" appears but "complete" (at the bottom of this file) does
+# not, registration raised mid-file. Together these two prints
+# disambiguate every silent-load failure mode we hit in the April 2026
+# debugging session.
+print("[supabase_tcg] module load starting", flush=True)
+
 
 # ── Availability check ──────────────────────────────────────────────────
 def _check_supabase():
@@ -522,4 +531,16 @@ registry.register(
     check_fn=_check_supabase,
     emoji="🌱",
     description="Seed canonical marketplace sources",
+)
+
+
+# ── Load-time confirmation ──────────────────────────────────────────────
+# Reaching this line proves all 6 registry.register() calls executed
+# without raising. If the "starting" line above appears in the deploy
+# log but THIS line does not, one of the registrations failed silently.
+print(
+    "[supabase_tcg] module load complete — registered 6 tools: "
+    "save_entry, query_entries, list_sources, add_source, "
+    "run_ingestion, seed_marketplace_sources",
+    flush=True,
 )
