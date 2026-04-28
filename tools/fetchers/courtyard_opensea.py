@@ -1,24 +1,19 @@
 """
-Courtyard → OpenSea aggregate stats adapter.
+Courtyard → OpenSea aggregate stats adapter. **DEPRECATED 2026-04-28.**
 
-Why this exists:
-  Courtyard is 100 % on Polygon (ERC-721 at
-  0x251be3a17af4892035c37ebf5890f4a4d889dcad) but their own marketplace data
-  lives on a private api.courtyard.io behind Privy auth — not reachable
-  without a key. OpenSea's v2 `collections/{slug}/stats` endpoint, however,
-  is keyless and gives us aggregate market_cap, floor_price, volume and
-  sales counts for 1d / 7d / 30d windows. That's enough for Hermes to track
-  Courtyard's macro market, even if per-listing fidelity needs a key later.
+OpenSea's v2 stats endpoint now requires X-API-KEY auth (returns 401 for
+anonymous requests). Rather than adding yet another vendor + API key + rate
+limit surface, the architectural decision is to read the chain directly
+via Alchemy (we already have ALCHEMY_POLYGON_API_KEY). The replacement
+lives in tools/fetchers/courtyard_alchemy.py — that adapter currently
+fetches NFT metadata; the next change is to add Alchemy NFT API calls for
+floor prices (`getFloorPrice`) and sales history (`getNFTSales`), which
+covers the same data this OpenSea adapter was producing.
 
-What it writes:
-  - one `fundamental` entry per interval (one_day, seven_day, thirty_day)
-    with volume, sales, average_price, volume_change
-  - one `price` entry with the current collection floor
-  - dedup_key = sha(source_id, interval, date) — new rows land daily
-
-Stability:
-  Only dependency is a public OpenSea endpoint. No auth. No scraping.
-  Degrades to status='error' cleanly if the endpoint shape changes.
+Until courtyard_alchemy is enhanced, this adapter is left in place but
+the corresponding hermes_sources row should be marked `enabled = false`
+so the cron stops erroring on it nightly. To re-enable later if Alchemy
+proves insufficient, set OPENSEA_API_KEY as an env var.
 """
 
 from __future__ import annotations
@@ -51,7 +46,13 @@ class CourtyardOpenSeaStats(FetcherAdapter):
         try:
             data = self.http_json(_STATS_URL, timeout=20, retries=2)
         except Exception as e:
-            return result.mark_done("error", f"OpenSea stats fetch failed: {e}")
+            return result.mark_done(
+                "error",
+                f"OpenSea stats fetch failed: {e}. "
+                "This adapter is deprecated — the corresponding hermes_sources "
+                "row should be disabled. See tools/fetchers/courtyard_alchemy.py "
+                "for the chain-direct replacement.",
+            )
 
         total = data.get("total") or {}
         intervals = data.get("intervals") or []
