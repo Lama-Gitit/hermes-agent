@@ -13,8 +13,7 @@ if os.environ.get("VENICE_API_KEY"):
     _skip_keys.add("ANTHROPIC_API_KEY")
     print("[write_env] Venice mode: filtering ANTHROPIC_API_KEY out of .env to prevent auto-detection", flush=True)
 
-env_content = ""
-for k in [
+_ENV_ALLOWLIST = [
     "ANTHROPIC_API_KEY",
     "HERMES_INFERENCE_PROVIDER",
     "HERMES_PROVIDER",
@@ -46,7 +45,16 @@ for k in [
     "TCGPLAYER_BEARER_TOKEN",
     "POKEMONPRICETRACKER_API_KEY",
     "COURTYARD_API_KEY",
-]:
+]
+
+# Diagnostic: which allow-list keys are actually present in os.environ
+_present = [k for k in _ENV_ALLOWLIST if k in os.environ and os.environ[k]]
+_missing = [k for k in _ENV_ALLOWLIST if k not in os.environ or not os.environ[k]]
+print(f"[write_env] env-vars present ({len(_present)}): {_present}", flush=True)
+print(f"[write_env] env-vars missing ({len(_missing)}): {_missing}", flush=True)
+
+env_content = ""
+for k in _ENV_ALLOWLIST:
     if k in _skip_keys:
         continue
     if k in os.environ:
@@ -57,6 +65,50 @@ with open("/root/.hermes/.env", "w") as f:
     f.write(env_content)
 with open("/app/.env", "w") as f:
     f.write(env_content)
+print(
+    f"[write_env] wrote /app/.env ({len(env_content)} bytes, "
+    f"{env_content.count(chr(10))} lines)",
+    flush=True,
+)
+
+# ── Bake credentials into an importable runtime-secrets module ──────────
+# The Hermes gateway overwrites os.environ on startup, so credentials in
+# the .env file don't always reach tool subprocesses. Same pattern as the
+# supabase-messages hook below: write the credentials as Python literals
+# into a module the adapters can import. Adapters use this as a fallback
+# when os.environ is stripped.
+_secrets_dir = "/root/.hermes"
+_secrets_path = os.path.join(_secrets_dir, "runtime_secrets.py")
+os.makedirs(_secrets_dir, exist_ok=True)
+
+
+def _safe_repr(v: str) -> str:
+    """Python string literal that survives any embedded special chars."""
+    return repr(v if isinstance(v, str) else "")
+
+
+_runtime_secrets = (
+    '"""Runtime secrets baked in by write_env.py at container startup.\n'
+    "\n"
+    "Adapters import these as a fallback when os.environ is stripped by\n"
+    "the Hermes gateway. Do NOT commit values — this file is generated\n"
+    "fresh on every deploy from NodeOps Runtime Variables.\n"
+    '"""\n\n'
+)
+for k in _ENV_ALLOWLIST:
+    if k in _skip_keys:
+        _runtime_secrets += f"{k} = ''  # filtered (skip-list)\n"
+    else:
+        v = os.environ.get(k, "")
+        _runtime_secrets += f"{k} = {_safe_repr(v)}\n"
+
+with open(_secrets_path, "w") as f:
+    f.write(_runtime_secrets)
+os.chmod(_secrets_path, 0o600)
+print(
+    f"[write_env] wrote {_secrets_path} ({len(_runtime_secrets)} bytes)",
+    flush=True,
+)
 
 # ── SOUL.md ───────────────────────────────────────────────────────────
 with open("/root/.hermes/SOUL.md", "w") as f:

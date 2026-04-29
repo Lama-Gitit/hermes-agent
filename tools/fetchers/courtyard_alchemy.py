@@ -1,27 +1,36 @@
 """
-Courtyard → Alchemy enumerator + Courtyard metadata hydrator.
+Courtyard → Alchemy enumerator + metadata hydrator + price fetcher.
 
-Two-step fetch:
-  1. Alchemy `getNFTsForContract` gives us a paginated stream of tokenIds
-     and tokenUris for the Courtyard ERC-721 contract on Polygon.
-  2. Each tokenUri points at api.courtyard.io's *public* metadata.json
-     (no auth needed). We hit it to hydrate the real slab data:
-     the `proof_of_integrity.fingerprint` string contains the exact
-     graded slab description, e.g.
-       "Baseball | PSA 97322199 | 2021 Bowman Draft BDC200 Tyler Black | 9 MINT"
-     which we parse into structured attributes.
+Four-step fetch (each step independently try/except wrapped):
+  1. Alchemy `getNFTsForContract` — paginated tokenIds + tokenUris for the
+     Courtyard ERC-721 contract on Polygon. → claim_type=fundamental
+  2. For each token, hydrate via api.courtyard.io's public metadata.json
+     for the `proof_of_integrity.fingerprint` ("Pokemon | PSA 12345678 |
+     2019 Hidden Fates SV49 Charizard Shiny | 10 GEM MT") which we parse
+     into structured attributes. → claim_type=fundamental (still)
+  3. Alchemy `getFloorPrice` — current floor price across marketplaces
+     (OpenSea on Polygon). → claim_type=price, card_id=collection:courtyard
+  4. Alchemy `getNFTSales` — recent on-chain sales with marketplace,
+     buyer/seller, fees, and sale amount. → claim_type=price, one entry
+     per transaction.
 
 Usage notes:
   - `demo` Alchemy key works for small / infrequent calls but is rate-limited.
     Store a free key in env var ALCHEMY_POLYGON_API_KEY for real use.
   - Source `notes` column can carry a JSON blob with config, e.g.
-      {"page_size": 100, "max_pages": 3, "start_page_key": null, "hydrate": true}
-    - page_size    : Alchemy page size (max 100)
-    - max_pages    : how many pages to fetch per run
-    - start_page_key: resume from a previous run's pageKey
-    - hydrate      : whether to fetch metadata.json per token (default true)
-  - We emit one `fundamental` entry per token snapshot.
-    dedup_key = contract + tokenId (token is unique forever).
+      {"page_size": 100, "max_pages": 3, "hydrate": true,
+       "fetch_floor": true, "fetch_sales": true, "sales_limit": 100}
+    - page_size      : Alchemy page size (max 100)
+    - max_pages      : how many metadata pages to fetch per run
+    - start_page_key : resume from a previous run's pageKey
+    - hydrate        : whether to fetch metadata.json per token (default true)
+    - fetch_floor    : whether to call getFloorPrice (default true)
+    - fetch_sales    : whether to call getNFTSales (default true)
+    - sales_limit    : how many recent sales to fetch (default 100, max 1000)
+  - Dedup keys:
+      fundamental (token snapshot) : contract + tokenId
+      price       (collection floor): contract + "floor" + marketplace + date
+      price       (sale)            : tx_hash + log_index + bundle_index + tokenId
 """
 
 from __future__ import annotations
@@ -33,6 +42,7 @@ from datetime import date
 from typing import Any, Dict, List, Optional
 
 from tools.fetchers.base import FetcherAdapter, FetchEntry, FetchResult, register
+from tools.secrets_loader import get_secret
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +50,15 @@ _CONTRACT = "0x251be3a17af4892035c37ebf5890f4a4d889dcad"
 
 
 def _alchemy_base() -> str:
-    key = os.environ.get("ALCHEMY_POLYGON_API_KEY") or "demo"
+    # Prefer env, fall back to runtime_secrets.py (baked at boot by
+    # write_env.py because Hermes gateway strips os.environ post-startup).
+    # See tools/secrets_loader.py for the rationale.
+    key = get_secret("ALCHEMY_POLYGON_API_KEY") or "demo"
+    if key == "demo":
+        logger.warning(
+            "[courtyard_alchemy] using public 'demo' key — rate-limited; "
+            "set ALCHEMY_POLYGON_API_KEY in NodeOps Runtime Variables"
+        )
     return f"https://polygon-mainnet.g.alchemy.com/nft/v3/{key}"
 
 
@@ -237,6 +255,172 @@ class CourtyardAlchemyCatalog(FetcherAdapter):
                 )
             )
 
+        # ── Step 3: Floor price across marketplaces ────────────────────────
+        if cfg.get("fetch_floor", True):
+            try:
+                self._add_floor_price_entries(result, today)
+            except Exception as e:
+                logger.warning("[courtyard_alchemy] floor price fetch failed: %s", e)
+
+        # ── Step 4: Recent on-chain sales ──────────────────────────────────
+        if cfg.get("fetch_sales", True):
+            try:
+                sales_limit = int(cfg.get("sales_limit", 100))
+                self._add_sales_entries(result, today, sales_limit)
+            except Exception as e:
+                logger.warning("[courtyard_alchemy] sales fetch failed: %s", e)
+
         if not result.entries:
             return result.mark_done("partial", "no tokens returned")
         return result.mark_done("success")
+
+    # ── Helpers for the price-side endpoints ───────────────────────────────
+
+    def _add_floor_price_entries(self, result: FetchResult, today: str) -> None:
+        """Call getFloorPrice and emit one price entry per marketplace."""
+        url = f"{_alchemy_base()}/getFloorPrice?contractAddress={_CONTRACT}"
+        data = self.http_json(url, timeout=15, retries=2)
+        # Shape: {"openSea": {"floorPrice": 12.5, "priceCurrency": "ETH",
+        #                     "collectionUrl": "...", "retrievedAt": "..."},
+        #         "looksRare": {...}}
+        added = 0
+        for marketplace, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            floor = info.get("floorPrice")
+            if floor is None:
+                continue
+            try:
+                amount = float(floor)
+            except (TypeError, ValueError):
+                continue
+            currency = info.get("priceCurrency")
+            collection_url = info.get("collectionUrl")
+            retrieved_at = info.get("retrievedAt")
+
+            result.entries.append(
+                FetchEntry(
+                    card_id="collection:courtyard",
+                    claim_type="price",
+                    confidence="observed",
+                    date_observed=today,
+                    value={
+                        "metric": "collection_floor",
+                        "marketplace": marketplace,
+                        "amount": amount,
+                        "currency": currency,
+                        "collection_url": collection_url,
+                        "retrieved_at": retrieved_at,
+                        "observed_at": self.now_iso(),
+                    },
+                    source={
+                        "url": collection_url
+                        or "https://opensea.io/collection/courtyard-nft",
+                        "source_type": self.source_type,
+                        "author": "alchemy_nft_v3_floor",
+                        # prices are tier2 (price-tier source)
+                        "author_credibility": "tier2",
+                        "chain": "polygon",
+                        "contract": _CONTRACT,
+                    },
+                    dedup_key=self.stable_hash(
+                        "courtyard", "floor", marketplace, today
+                    ),
+                )
+            )
+            added += 1
+        result.items_found += added
+
+    def _add_sales_entries(
+        self, result: FetchResult, today: str, limit: int = 100
+    ) -> None:
+        """Call getNFTSales and emit one price entry per transaction."""
+        # Alchemy supports limit up to 1000; cap to be safe.
+        limit = max(1, min(int(limit), 1000))
+        url = (
+            f"{_alchemy_base()}/getNFTSales"
+            f"?contractAddress={_CONTRACT}"
+            f"&order=desc"
+            f"&limit={limit}"
+        )
+        data = self.http_json(url, timeout=25, retries=2)
+        sales = data.get("nftSales") or []
+        result.items_found += len(sales)
+
+        for sale in sales:
+            tx_hash = sale.get("transactionHash")
+            log_index = sale.get("logIndex")
+            bundle_index = sale.get("bundleIndex", 0)
+            token_id = sale.get("tokenId")
+            if not tx_hash or token_id is None:
+                continue
+
+            seller_fee = sale.get("sellerFee") or {}
+            protocol_fee = sale.get("protocolFee") or {}
+            royalty_fee = sale.get("royaltyFee") or {}
+
+            # Total sale amount = seller_fee + protocol_fee + royalty_fee
+            # (all in the same token's smallest unit). Decimals taken from
+            # seller_fee (the dominant component) and assumed consistent
+            # across the three fee buckets in any given sale.
+            amount: Optional[float] = None
+            currency: Optional[str] = seller_fee.get("symbol")
+            try:
+                raw_total = (
+                    int(seller_fee.get("amount", "0") or "0")
+                    + int(protocol_fee.get("amount", "0") or "0")
+                    + int(royalty_fee.get("amount", "0") or "0")
+                )
+                decimals = int(seller_fee.get("decimals", "18") or "18")
+                amount = raw_total / (10 ** decimals) if raw_total else 0.0
+            except (TypeError, ValueError):
+                amount = None
+
+            marketplace = sale.get("marketplace")
+            block_number = sale.get("blockNumber")
+
+            result.entries.append(
+                FetchEntry(
+                    # We don't resolve token_id → card_id here; the sales
+                    # endpoint returns only tokenId. Future analysis can
+                    # join with the metadata-side fundamentals on token_id.
+                    card_id="unresolved",
+                    claim_type="price",
+                    confidence="canonical",  # on-chain sale is authoritative
+                    date_observed=today,
+                    value={
+                        "metric": "sale",
+                        "token_id": str(token_id),
+                        "marketplace": marketplace,
+                        "amount": amount,
+                        "currency": currency,
+                        "buyer": sale.get("buyerAddress"),
+                        "seller": sale.get("sellerAddress"),
+                        "tx_hash": tx_hash,
+                        "block_number": block_number,
+                        "log_index": log_index,
+                        "fees": {
+                            "seller": seller_fee.get("amount"),
+                            "protocol": protocol_fee.get("amount"),
+                            "royalty": royalty_fee.get("amount"),
+                            "decimals": seller_fee.get("decimals"),
+                        },
+                        "observed_at": self.now_iso(),
+                    },
+                    source={
+                        "url": (
+                            f"https://polygonscan.com/tx/{tx_hash}"
+                            if tx_hash
+                            else f"https://opensea.io/collection/courtyard-nft"
+                        ),
+                        "source_type": self.source_type,
+                        "author": "alchemy_nft_v3_sales",
+                        "author_credibility": "tier2",
+                        "chain": "polygon",
+                        "contract": _CONTRACT,
+                    },
+                    dedup_key=self.stable_hash(
+                        "courtyard", "sale", tx_hash, log_index, bundle_index, token_id
+                    ),
+                )
+            )
