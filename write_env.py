@@ -77,6 +77,13 @@ print(
 # supabase-messages hook below: write the credentials as Python literals
 # into a module the adapters can import. Adapters use this as a fallback
 # when os.environ is stripped.
+#
+# CRITICAL: preserve existing non-empty baked values when current env
+# doesn't have them. Observation from production: NodeOps appears to run
+# this entrypoint TWICE — first run has API keys (e.g. ALCHEMY_POLYGON_API_KEY)
+# but no POSTGRES_*, second run has POSTGRES_* but with API keys stripped.
+# A naive overwrite blanks out values from the first run. Merging keeps
+# whichever value was set most recently (env > existing baked > empty).
 _secrets_dir = "/root/.hermes"
 _secrets_path = os.path.join(_secrets_dir, "runtime_secrets.py")
 os.makedirs(_secrets_dir, exist_ok=True)
@@ -87,26 +94,61 @@ def _safe_repr(v: str) -> str:
     return repr(v if isinstance(v, str) else "")
 
 
+def _load_existing_baked() -> dict:
+    """Read previously-baked secrets so we can preserve values when env is empty."""
+    if not os.path.exists(_secrets_path):
+        return {}
+    try:
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location("_old_baked", _secrets_path)
+        if spec is None or spec.loader is None:
+            return {}
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        out = {}
+        for k in _ENV_ALLOWLIST:
+            v = getattr(mod, k, "")
+            if isinstance(v, str) and v.strip():
+                out[k] = v
+        return out
+    except Exception as _e:
+        print(f"[write_env] could not read existing {_secrets_path}: {_e}", flush=True)
+        return {}
+
+
+_existing_baked = _load_existing_baked()
+_preserved_keys: list = []
 _runtime_secrets = (
     '"""Runtime secrets baked in by write_env.py at container startup.\n'
     "\n"
     "Adapters import these as a fallback when os.environ is stripped by\n"
-    "the Hermes gateway. Do NOT commit values — this file is generated\n"
-    "fresh on every deploy from NodeOps Runtime Variables.\n"
+    "the Hermes gateway. Values are merged across multiple write_env.py\n"
+    "runs — env > previously-baked > empty — so a second run with stripped\n"
+    "env doesn't blank out a key the first run had.\n"
     '"""\n\n'
 )
 for k in _ENV_ALLOWLIST:
     if k in _skip_keys:
         _runtime_secrets += f"{k} = ''  # filtered (skip-list)\n"
+        continue
+    env_v = os.environ.get(k, "")
+    if isinstance(env_v, str) and env_v.strip():
+        # Current env has a value — use it
+        _runtime_secrets += f"{k} = {_safe_repr(env_v)}\n"
+    elif k in _existing_baked:
+        # Env doesn't have it but a previous run baked one in — preserve
+        _runtime_secrets += f"{k} = {_safe_repr(_existing_baked[k])}  # preserved from earlier run\n"
+        _preserved_keys.append(k)
     else:
-        v = os.environ.get(k, "")
-        _runtime_secrets += f"{k} = {_safe_repr(v)}\n"
+        # Genuinely unset
+        _runtime_secrets += f"{k} = ''\n"
 
 with open(_secrets_path, "w") as f:
     f.write(_runtime_secrets)
 os.chmod(_secrets_path, 0o600)
 print(
-    f"[write_env] wrote {_secrets_path} ({len(_runtime_secrets)} bytes)",
+    f"[write_env] wrote {_secrets_path} ({len(_runtime_secrets)} bytes); "
+    f"preserved {len(_preserved_keys)} keys from earlier run: {_preserved_keys}",
     flush=True,
 )
 
