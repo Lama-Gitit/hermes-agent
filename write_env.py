@@ -420,4 +420,56 @@ if os.path.isdir(_old_hook):
         print(f"[write_env] Could not remove old hook: {_e}", flush=True)
 
 
+# ── Ensure marketplace-ingestion cron job exists ─────────────────────
+# Cron jobs live in /root/.hermes/cron/jobs.json which is part of the
+# ephemeral container filesystem and gets wiped on every NodeOps redeploy.
+# Re-create the standing job here at every boot so it survives — same
+# pattern as the supabase-messages hook above.
+try:
+    sys.path.insert(0, "/app")
+    from cron.jobs import list_jobs, create_job  # type: ignore
+
+    _JOB_NAME = "marketplace-ingestion"
+    _JOB_PROMPT = (
+        "Run the daily marketplace ingestion. Use the terminal tool to "
+        "execute exactly this command: cd /app && python3 -m "
+        "tools.fetchers.tools_api types courtyard_alchemy phygitals_magiceden "
+        "— then parse the JSON output and reply with one line per source "
+        "showing source_type, items_found, entries_inserted, deduped_out, "
+        "and status. If any source has status=error, include the first 200 "
+        "chars of its error message."
+    )
+    _JOB_SCHEDULE = "0 5 * * *"  # daily 05:00 UTC
+
+    # Delivery target. For Telegram DMs the chat_id == user_id, so use the
+    # first allowed user. Falls back to "local" (filesystem only) if no
+    # Telegram user is configured.
+    _allowed = (os.environ.get("TELEGRAM_ALLOWED_USERS") or "").strip()
+    _first_user = _allowed.split(",")[0].strip() if _allowed else ""
+    _deliver = f"telegram:{_first_user}" if _first_user else "local"
+
+    _existing = [j for j in list_jobs() if j.get("name") == _JOB_NAME]
+    if _existing:
+        print(
+            f"[write_env] cron job '{_JOB_NAME}' already exists "
+            f"(id={_existing[0].get('id')}, next_run={_existing[0].get('next_run_at')})",
+            flush=True,
+        )
+    else:
+        _job = create_job(
+            prompt=_JOB_PROMPT,
+            schedule=_JOB_SCHEDULE,
+            name=_JOB_NAME,
+            deliver=_deliver,
+        )
+        print(
+            f"[write_env] created cron job '{_JOB_NAME}' "
+            f"(id={_job.get('id')}, schedule={_JOB_SCHEDULE}, "
+            f"deliver={_deliver}, next_run={_job.get('next_run_at')})",
+            flush=True,
+        )
+except Exception as _cron_err:
+    print(f"[write_env] could not ensure cron job: {_cron_err}", flush=True)
+
+
 os.execvp(sys.executable, [sys.executable, "gateway/run.py"])
